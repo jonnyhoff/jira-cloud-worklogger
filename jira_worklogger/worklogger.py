@@ -5,6 +5,7 @@ from jira import JIRA
 from jira.client import ResultList
 from jira.resources import Issue
 from jira.exceptions import JIRAError
+from halo import Halo
 import questionary
 import sys
 import pathlib
@@ -950,17 +951,34 @@ def main(
 
     if log_method == "auto":
         questionary.press_any_key_to_continue(
-            message="Press any key to START the timer and start logging your work..."
+            message="Press any key to START the timer and begin logging your work..."
         ).unsafe_ask()
         start_time = datetime.datetime.now()
+        questionary.print(
+            "Timer running. Leave this terminal open and press Enter when you're done working.",
+            style="fg:ansicyan",
+        )
+        spinner = Halo(
+            text="Tracking time...",
+            spinner="dots",
+        )
+        spinner.start()
+        try:
+            input()
+        finally:
+            spinner.stop()
+        stop_time = datetime.datetime.now()
+        seconds_spent = max((stop_time - start_time).total_seconds(), 0)
+        minutes_spent = max(int(round(seconds_spent / 60.0)), 1)
+        time_spent = f"{minutes_spent}m"
+        questionary.print(
+            f"Timer stopped after approximately {minutes_spent} minute(s).",
+            style="fg:ansigreen",
+        )
         comment = questionary.text(
             message="Enter an optional comment for what you've worked on:",
             multiline=True,
         ).unsafe_ask()
-        stop_time = datetime.datetime.now()
-        seconds_spent = (stop_time - start_time).total_seconds()
-        minutes_spent = round(seconds_spent / 60.0, 2)
-        time_spent = "%dm" % minutes_spent
 
     happy_with_time = False
     while not happy_with_time:
