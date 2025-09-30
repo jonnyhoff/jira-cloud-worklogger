@@ -80,16 +80,35 @@ For the Red Hat issues, that is [here](https://issues.redhat.com/secure/ViewProf
 
 ### Controlling which issues appear
 
-Each server configuration now stores the JQL that seeds the initial issue list.
-During setup you can accept the default (`assignee=currentUser() AND statusCategory not in (Done)`) or supply any
-query that matches the issues you typically log time against. Existing
-configurations can be updated manually by adding an `issue_jql = ...` line to the
-corresponding section in `~/.config/jira-worklogger/jira-worklogger.conf`.
+When you reach the issue picker, the CLI first asks **how** you want to find
+issues. The built-in views currently include:
 
-While picking issues, use the new "Search Jira" options to pull in additional
-issues on demand. The keyword search scans summaries/descriptions (and accepts
-issue keys), and the custom JQL option lets you paste any query before returning
-to the selection list.
+- `My assigned issues` – uses the per-server `issue_jql` (defaults to
+  `assignee=currentUser() AND statusCategory not in (Done)`).
+- `Shared/team buckets` – available when `team_issue_jql` is configured for the
+  server.
+- `All project tickets` – available when the server lists project keys via
+  `project_keys = ABC, XYZ`. The CLI expands this to
+  `project in (ABC, XYZ) AND statusCategory not in (Done)`.
+- `Search Jira by keywords` and `Search Jira with custom JQL` – ad‑hoc searches
+  that add more issues to the current selection round.
+- `Enter issue key manually` – quick entry for a known key.
+- `Review current selection` – remove previously chosen issues before logging
+  time.
+
+You can configure these views during server setup or later by editing the
+section inside `~/.config/jira-worklogger/jira-worklogger.conf`:
+
+```
+[my-server]
+url = https://example.atlassian.net
+auth_type = cloud_token
+issue_jql = assignee = currentUser() AND statusCategory not in (Done)
+team_issue_jql = project = MEET AND type = Task
+project_keys = PROJ, OPS, MEET
+```
+
+Leave `team_issue_jql` and `project_keys` blank if you don’t need those views.
 
 ### Run from source
 

@@ -12,6 +12,7 @@ import logging
 import datetime
 import configparser
 import dataclasses
+from dataclasses import field
 from collections.abc import Callable
 from typing import Any
 import re
@@ -20,10 +21,16 @@ logging.basicConfig(level=logging.INFO)
 
 
 DEFAULT_ISSUE_JQL = "assignee=currentUser() AND statusCategory not in (Done)"
+DEFAULT_TEAM_ISSUE_JQL = ""  # Optional, user can configure later
 SEARCH_RESULT_LIMIT = 50
 SEARCH_BY_TEXT_VALUE = "__search_by_text__"
 SEARCH_BY_JQL_VALUE = "__search_by_jql__"
 MANUAL_ENTRY_VALUE = "__manual_entry__"
+VIEW_MY_ISSUES = "__view_my_issues__"
+VIEW_TEAM_ISSUES = "__view_team_issues__"
+VIEW_PROJECT_ISSUES = "__view_project_issues__"
+VIEW_REVIEW_SELECTION = "__view_review_selection__"
+VIEW_FINISH_SELECTION = "__view_finish_selection__"
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -35,6 +42,8 @@ class Server:
     email: str = ""
     api_token: str = ""
     issue_jql: str = DEFAULT_ISSUE_JQL
+    team_issue_jql: str = DEFAULT_TEAM_ISSUE_JQL
+    project_keys: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.auth_type = self.auth_type.strip()
@@ -44,6 +53,18 @@ class Server:
         self.email = self.email.strip()
         self.api_token = self.api_token.strip()
         self.issue_jql = (self.issue_jql or DEFAULT_ISSUE_JQL).strip()
+        self.team_issue_jql = (self.team_issue_jql or "").strip()
+        normalized_project_keys: list[str] = []
+        seen_projects: set[str] = set()
+        for key in self.project_keys:
+            if not key:
+                continue
+            normalized = key.strip().upper()
+            if not normalized or normalized in seen_projects:
+                continue
+            seen_projects.add(normalized)
+            normalized_project_keys.append(normalized)
+        self.project_keys = normalized_project_keys
 
 
 class Config:
@@ -74,6 +95,17 @@ class Config:
                 option="issue_jql",
                 fallback=DEFAULT_ISSUE_JQL,
             )
+            team_issue_jql = self._parser.get(
+                section=section,
+                option="team_issue_jql",
+                fallback=DEFAULT_TEAM_ISSUE_JQL,
+            )
+            project_keys_raw = self._parser.get(
+                section=section,
+                option="project_keys",
+                fallback="",
+            )
+            project_keys = [key for key in project_keys_raw.split(",") if key]
 
             if auth_type == "pat":
                 pat = self._parser.get(section=section, option="pat", fallback="")
@@ -88,6 +120,8 @@ class Config:
                         name=section,
                         pat=pat,
                         issue_jql=issue_jql,
+                        team_issue_jql=team_issue_jql,
+                        project_keys=project_keys,
                     )
                 )
                 continue
@@ -109,6 +143,8 @@ class Config:
                         email=email,
                         api_token=api_token,
                         issue_jql=issue_jql,
+                        team_issue_jql=team_issue_jql,
+                        project_keys=project_keys,
                     )
                 )
                 continue
@@ -131,6 +167,12 @@ class Config:
         self._parser.set(section=section, option="url", value=s.url)
         self._parser.set(section=section, option="auth_type", value=s.auth_type)
         self._parser.set(section=section, option="issue_jql", value=s.issue_jql)
+        self._parser.set(section=section, option="team_issue_jql", value=s.team_issue_jql)
+        self._parser.set(
+            section=section,
+            option="project_keys",
+            value=",".join(s.project_keys),
+        )
 
         if s.auth_type == "pat":
             self._parser.set(section=section, option="pat", value=s.pat)
@@ -211,6 +253,29 @@ def add_new_server_questions(c: Config) -> Server:
     if not issue_jql:
         issue_jql = DEFAULT_ISSUE_JQL
 
+    team_issue_jql = (
+        questionary.text(
+            message="Optional JQL for shared/team buckets (leave blank to skip):",
+            default=DEFAULT_TEAM_ISSUE_JQL,
+        )
+        .unsafe_ask()
+        .strip()
+    )
+
+    project_keys_input = (
+        questionary.text(
+            message="Optional Jira project keys for broader searches (comma separated):",
+            default="",
+        )
+        .unsafe_ask()
+        .strip()
+    )
+    project_keys = [
+        key.strip()
+        for key in project_keys_input.split(",")
+        if key.strip()
+    ]
+
     if auth_type == "pat":
         # For a new PAT go to:
         # https://issues.redhat.com/secure/ViewProfile.jspa?selectedTab=com.atlassian.pats.pats-plugin:jira-user-personal-access-tokens
@@ -232,6 +297,8 @@ def add_new_server_questions(c: Config) -> Server:
             name=name,
             pat=pat,
             issue_jql=issue_jql,
+            team_issue_jql=team_issue_jql,
+            project_keys=project_keys,
         )
 
     email = (
@@ -262,6 +329,8 @@ def add_new_server_questions(c: Config) -> Server:
         email=email,
         api_token=api_token,
         issue_jql=issue_jql,
+        team_issue_jql=team_issue_jql,
+        project_keys=project_keys,
     )
 
 
@@ -386,52 +455,37 @@ def main(
         "description",
     ]
 
-    base_issue_jql = server.issue_jql or DEFAULT_ISSUE_JQL
-
-    issue_pool: dict[str, Issue] = {}
-    issue_order: list[str] = []
+    issue_cache: dict[str, Issue] = {}
     issue_key_pattern = re.compile(r"^[A-Z][A-Z0-9_]*-\d+$")
 
-    def add_issues_to_pool(new_issues: ResultList[Issue]) -> int:
-        added = 0
-        for issue in new_issues:
-            if issue.key not in issue_pool:
-                issue_order.append(issue.key)
-                added += 1
-            issue_pool[issue.key] = issue
-        return added
-
-    def run_search_with_jql(jql_to_run: str) -> None:
+    def fetch_issues_with_jql(
+        jql_to_run: str,
+        *,
+        limit: int | None = None,
+    ) -> list[Issue]:
         logging.debug("Searching Jira with JQL: %s", jql_to_run)
+        search_kwargs: dict[str, Any] = {
+            "jql_str": jql_to_run,
+            "fields": pull_issue_fields,
+        }
+        if limit is None:
+            search_kwargs["maxResults"] = False
+        else:
+            search_kwargs["maxResults"] = limit
+
         try:
-            search_results: ResultList[Issue] = jira.search_issues(
-                jql_str=jql_to_run,
-                fields=pull_issue_fields,
-                maxResults=SEARCH_RESULT_LIMIT,
-            )
+            search_results: ResultList[Issue] = jira.search_issues(**search_kwargs)
         except JIRAError as ex:
             questionary.print(
                 f"Failed to run JQL search: {ex.text}",
                 style="fg:ansired",
             )
-            return
+            return []
 
-        added = add_issues_to_pool(search_results)
-        if len(search_results) == 0:
-            questionary.print(
-                "No issues matched that search.",
-                style="fg:ansiyellow",
-            )
-        elif added == 0:
-            questionary.print(
-                "All matching issues were already listed.",
-                style="fg:ansiyellow",
-            )
-        else:
-            questionary.print(
-                f"Added {added} issue(s) from the search.",
-                style="fg:ansigreen",
-            )
+        issues = list(search_results)
+        for issue in issues:
+            issue_cache[issue.key] = issue
+        return issues
 
     def build_keyword_search_jql(term: str) -> str:
         escaped_term = term.replace('"', '\\"')
@@ -444,67 +498,255 @@ def main(
             clauses.insert(0, f'key = "{normalized_key}"')
         return " OR ".join(clauses) + " ORDER BY updated DESC"
 
-    def build_issue_choices() -> list[questionary.Choice | questionary.Separator]:
-        choices: list[questionary.Choice | questionary.Separator] = [
+    def issue_choices_for_view(issues: list[Issue]) -> list[questionary.Choice]:
+        return [
             questionary.Choice(
-                title=f"{issue_pool[key].key} - {issue_pool[key].fields.summary}",
-                description=f"Status: {issue_pool[key].fields.status}",
-                value=issue_pool[key].key,
+                title=f"{issue.key} - {issue.fields.summary}",
+                description=f"Status: {issue.fields.status}",
+                value=issue.key,
+                checked=issue.key in selected_issue_set,
             )
-            for key in issue_order
+            for issue in issues
         ]
-        if issue_order:
-            choices.append(questionary.Separator())
+
+    selected_issue_keys: list[str] = []
+    selected_issue_set: set[str] = set()
+
+    def sync_selection_from_view(view_keys: list[str], chosen_keys: list[str]) -> None:
+        nonlocal selected_issue_keys, selected_issue_set
+        for key in chosen_keys:
+            if key not in selected_issue_set:
+                selected_issue_keys.append(key)
+                selected_issue_set.add(key)
+        for key in view_keys:
+            if key not in chosen_keys and key in selected_issue_set:
+                selected_issue_set.remove(key)
+        selected_issue_keys = [
+            key for key in selected_issue_keys if key in selected_issue_set
+        ]
+
+    def build_view_choices() -> list[questionary.Choice | questionary.Separator]:
+        choices: list[questionary.Choice | questionary.Separator] = []
         choices.append(
             questionary.Choice(
-                title="Search Jira by keywords...",
+                title="My assigned issues",
+                description="Issues assigned to you and not Done",
+                value=VIEW_MY_ISSUES,
+                shortcut_key="m",
+            )
+        )
+        if server.team_issue_jql:
+            choices.append(
+                questionary.Choice(
+                    title="Shared/team buckets",
+                    description="Your configured team JQL",
+                    value=VIEW_TEAM_ISSUES,
+                    shortcut_key="t",
+                )
+            )
+        if server.project_keys:
+            project_list = ", ".join(server.project_keys)
+            choices.append(
+                questionary.Choice(
+                    title="All project tickets",
+                    description=f"Issues in projects: {project_list}",
+                    value=VIEW_PROJECT_ISSUES,
+                    shortcut_key="p",
+                )
+            )
+        choices.append(questionary.Separator())
+        choices.append(
+            questionary.Choice(
+                title="Search Jira by keywords",
                 description="Run a quick summary/description search",
                 value=SEARCH_BY_TEXT_VALUE,
+                shortcut_key="s",
             )
         )
         choices.append(
             questionary.Choice(
-                title="Search Jira with custom JQL...",
+                title="Search Jira with custom JQL",
                 description="Paste or type any JQL query",
                 value=SEARCH_BY_JQL_VALUE,
             )
         )
         choices.append(
             questionary.Choice(
-                title="My issue is not listed, enter manually",
+                title="Enter issue key manually",
                 value=MANUAL_ENTRY_VALUE,
             )
         )
+        choices.append(questionary.Separator())
+        if selected_issue_keys:
+            choices.append(
+                questionary.Choice(
+                    title=f"Review current selection ({len(selected_issue_keys)} selected)",
+                    value=VIEW_REVIEW_SELECTION,
+                )
+            )
+            choices.append(
+                questionary.Choice(
+                    title="Done selecting issues",
+                    value=VIEW_FINISH_SELECTION,
+                    shortcut_key="d",
+                )
+            )
+        else:
+            choices.append(
+                questionary.Choice(
+                    title="Review current selection",
+                    disabled="No issues selected yet",
+                )
+            )
+            choices.append(
+                questionary.Choice(
+                    title="Done selecting issues",
+                    disabled="Select at least one issue",
+                )
+            )
         return choices
 
-    initial_issues: ResultList[Issue] = jira.search_issues(
-        jql_str=base_issue_jql,
-        fields=pull_issue_fields,
-    )
-    add_issues_to_pool(initial_issues)
+    def prompt_and_sync_from_issues(
+        *,
+        issues: list[Issue],
+        prompt_message: str,
+    ) -> None:
+        if not issues:
+            questionary.print(
+                "No issues matched that choice.",
+                style="fg:ansiyellow",
+            )
+            return
 
-    # Repeatedly ask for which issue to select and make sure it is found in case the
-    # issue key was entered manually.
-    issue_keys = []
-    issues_found = False
-    while not issues_found:
-        try:
-            issue_keys = questionary.checkbox(
-                message="Which issue(s) do you work on?",
-                instruction="Use arrows to select issues, type to filter, or choose a search option below to load more results.",
-                choices=build_issue_choices(),
-                use_search_filter=True,
-                use_jk_keys=False,  # Has to be disabled when using search filter,
-            ).unsafe_ask()
-        except KeyboardInterrupt:
-            questionary.print("Cancelled by user. Exiting.")
-            sys.exit(1)
+        for issue in issues:
+            issue_cache[issue.key] = issue
 
-        # Check if anything was selected
-        if not issue_keys:
+        choices = issue_choices_for_view(issues)
+        selected_values = questionary.checkbox(
+            message=prompt_message,
+            instruction="Use arrows to select issues and space to toggle. Type to filter.",
+            choices=choices,
+            use_search_filter=True,
+            use_jk_keys=False,
+        ).unsafe_ask()
+        sync_selection_from_view([issue.key for issue in issues], selected_values)
+
+    def prompt_manual_issue_key() -> None:
+        manual_key = (
+            questionary.text(
+                message="Enter the Jira issue key:",
+                instruction="For example: TEAM-123",
+                validate=lambda text: True if len(text.strip()) > 0 else "Please enter a value",
+            )
+            .unsafe_ask()
+            .strip()
+            .upper()
+        )
+        if not manual_key:
+            return
+        if manual_key in selected_issue_set:
+            questionary.print(
+                f"Issue {manual_key} is already selected.",
+                style="fg:ansiyellow",
+            )
+            return
+        selected_issue_set.add(manual_key)
+        selected_issue_keys.append(manual_key)
+
+    def review_current_selection() -> None:
+        if not selected_issue_keys:
+            questionary.print("No issues selected yet.", style="fg:ansiyellow")
+            return
+
+        review_choices = [
+            questionary.Choice(title=key, value=key, checked=True)
+            for key in selected_issue_keys
+        ]
+        updated_selection = questionary.checkbox(
+            message="Review selected issues",
+            instruction="Uncheck any issues you want to remove.",
+            choices=review_choices,
+            use_search_filter=True,
+            use_jk_keys=False,
+        ).unsafe_ask()
+
+        updated_set = set(updated_selection)
+        nonlocal_selected = [
+            key for key in selected_issue_keys if key in updated_set
+        ]
+        selected_issue_keys.clear()
+        selected_issue_keys.extend(nonlocal_selected)
+        selected_issue_set.clear()
+        selected_issue_set.update(updated_set)
+
+    def project_jql() -> str | None:
+        if not server.project_keys:
+            return None
+        project_list = ", ".join(server.project_keys)
+        return f"project in ({project_list}) AND statusCategory not in (Done)"
+
+    while True:
+        view_choice = questionary.select(
+            message="How would you like to find issues?",
+            choices=build_view_choices(),
+        ).unsafe_ask()
+
+        if view_choice == VIEW_FINISH_SELECTION:
+            break
+
+        if view_choice == VIEW_REVIEW_SELECTION:
+            review_current_selection()
             continue
 
-        if SEARCH_BY_TEXT_VALUE in issue_keys:
+        if view_choice == MANUAL_ENTRY_VALUE:
+            prompt_manual_issue_key()
+            continue
+
+        if view_choice == VIEW_MY_ISSUES:
+            my_jql = server.issue_jql or DEFAULT_ISSUE_JQL
+            issues = fetch_issues_with_jql(my_jql)
+            questionary.print(
+                f"Loaded {len(issues)} issue(s) assigned to you.",
+                style="fg:ansigreen" if issues else "fg:ansiyellow",
+            )
+            prompt_and_sync_from_issues(
+                issues=issues,
+                prompt_message="Select from your assigned issues",
+            )
+            continue
+
+        if view_choice == VIEW_TEAM_ISSUES:
+            issues = fetch_issues_with_jql(server.team_issue_jql)
+            questionary.print(
+                f"Loaded {len(issues)} team issue(s).",
+                style="fg:ansigreen" if issues else "fg:ansiyellow",
+            )
+            prompt_and_sync_from_issues(
+                issues=issues,
+                prompt_message="Select shared/team issues",
+            )
+            continue
+
+        if view_choice == VIEW_PROJECT_ISSUES:
+            jql = project_jql()
+            if not jql:
+                questionary.print(
+                    "No project keys configured for this server.",
+                    style="fg:ansiyellow",
+                )
+                continue
+            issues = fetch_issues_with_jql(jql)
+            questionary.print(
+                f"Loaded {len(issues)} project issue(s).",
+                style="fg:ansigreen" if issues else "fg:ansiyellow",
+            )
+            prompt_and_sync_from_issues(
+                issues=issues,
+                prompt_message="Select project issues",
+            )
+            continue
+
+        if view_choice == SEARCH_BY_TEXT_VALUE:
             search_term = (
                 questionary.text(
                     message="Search term to look for in Jira:",
@@ -514,12 +756,21 @@ def main(
                 .unsafe_ask()
                 .strip()
             )
-            if search_term:
-                keyword_jql = build_keyword_search_jql(search_term)
-                run_search_with_jql(keyword_jql)
+            if not search_term:
+                continue
+            keyword_jql = build_keyword_search_jql(search_term)
+            issues = fetch_issues_with_jql(keyword_jql, limit=SEARCH_RESULT_LIMIT)
+            questionary.print(
+                f"Loaded {len(issues)} issue(s) from keyword search.",
+                style="fg:ansigreen" if issues else "fg:ansiyellow",
+            )
+            prompt_and_sync_from_issues(
+                issues=issues,
+                prompt_message="Select issues from keyword search",
+            )
             continue
 
-        if SEARCH_BY_JQL_VALUE in issue_keys:
+        if view_choice == SEARCH_BY_JQL_VALUE:
             custom_jql = (
                 questionary.text(
                     message="Enter the JQL to run:",
@@ -530,49 +781,46 @@ def main(
                 .unsafe_ask()
                 .strip()
             )
-            if custom_jql:
-                run_search_with_jql(custom_jql)
-            continue
-
-        selected_keys: list[str] = []
-        for value in issue_keys:
-            if value == MANUAL_ENTRY_VALUE:
-                manual_key = (
-                    questionary.text(
-                        message="What is the key you work on?",
-                        instruction="e.g. JIRA-1234",
-                        validate=lambda text: (
-                            True if len(text) > 0 else "Please enter a value"
-                        ),
-                    )
-                    .unsafe_ask()
-                    .strip()
-                )
-                if manual_key:
-                    selected_keys.append(manual_key)
+            if not custom_jql:
                 continue
-
-            selected_keys.append(value)
-
-        issue_keys = list(dict.fromkeys(selected_keys))
-
-        if not issue_keys:
+            issues = fetch_issues_with_jql(custom_jql)
+            questionary.print(
+                f"Loaded {len(issues)} issue(s) from custom JQL.",
+                style="fg:ansigreen" if issues else "fg:ansiyellow",
+            )
+            prompt_and_sync_from_issues(
+                issues=issues,
+                prompt_message="Select issues from custom JQL",
+            )
             continue
 
-        # Load selected issues to ensure they all exist
-        # TODO(kwk): Can we do this in parallel somehow?
-        try:
-            for issue_key in issue_keys:
-                logging.debug(f"Loading issue {issue_key}")
-                jira.issue(id=issue_key, fields=["id", "key"])
-        except JIRAError as ex:
-            questionary.print(
-                f"Failed to find issue with key '{issue_keys}': {ex.text}"
-            )
-            questionary.print("Please select issues again.")
-        else:
-            issues_found = True
-            logging.debug("All issues exist")
+        questionary.print(
+            "Unsupported selection choice. Please pick another option.",
+            style="fg:ansired",
+        )
+
+    if not selected_issue_keys:
+        questionary.print(
+            "No issues selected. Exiting.",
+            style="fg:ansired",
+        )
+        sys.exit(1)
+
+    issue_keys = selected_issue_keys
+
+    # Load selected issues to ensure they all exist
+    # TODO(kwk): Can we do this in parallel somehow?
+    try:
+        for issue_key in issue_keys:
+            logging.debug(f"Loading issue {issue_key}")
+            jira.issue(id=issue_key, fields=["id", "key"])
+    except JIRAError as ex:
+        questionary.print(
+            f"Failed to find issue with key '{issue_keys}': {ex.text}"
+        )
+        questionary.print("Please run the tool again and verify your selections.")
+        sys.exit(1)
+    logging.debug("All issues exist")
 
     log_method = questionary.select(
         message="How do you want to log the time?",
