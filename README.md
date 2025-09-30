@@ -78,6 +78,19 @@ For the Red Hat issues, that is [here](https://issues.redhat.com/secure/ViewProf
 > **Security note:** The credentials you enter during setup are written to
 > `~/.config/jira-worklogger/jira-worklogger.conf` in plain text.
 
+### Controlling which issues appear
+
+Each server configuration now stores the JQL that seeds the initial issue list.
+During setup you can accept the default (`assignee=currentUser() AND statusCategory not in (Done)`) or supply any
+query that matches the issues you typically log time against. Existing
+configurations can be updated manually by adding an `issue_jql = ...` line to the
+corresponding section in `~/.config/jira-worklogger/jira-worklogger.conf`.
+
+While picking issues, use the new "Search Jira" options to pull in additional
+issues on demand. The keyword search scans summaries/descriptions (and accepts
+issue keys), and the custom JQL option lets you paste any query before returning
+to the selection list.
+
 ### Run from source
 
 Clone the code.

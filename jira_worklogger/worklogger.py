@@ -14,8 +14,16 @@ import configparser
 import dataclasses
 from collections.abc import Callable
 from typing import Any
+import re
 
 logging.basicConfig(level=logging.INFO)
+
+
+DEFAULT_ISSUE_JQL = "assignee=currentUser() AND statusCategory not in (Done)"
+SEARCH_RESULT_LIMIT = 50
+SEARCH_BY_TEXT_VALUE = "__search_by_text__"
+SEARCH_BY_JQL_VALUE = "__search_by_jql__"
+MANUAL_ENTRY_VALUE = "__manual_entry__"
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -26,6 +34,7 @@ class Server:
     pat: str = ""
     email: str = ""
     api_token: str = ""
+    issue_jql: str = DEFAULT_ISSUE_JQL
 
     def __post_init__(self) -> None:
         self.auth_type = self.auth_type.strip()
@@ -34,6 +43,7 @@ class Server:
         self.pat = self.pat.strip()
         self.email = self.email.strip()
         self.api_token = self.api_token.strip()
+        self.issue_jql = (self.issue_jql or DEFAULT_ISSUE_JQL).strip()
 
 
 class Config:
@@ -59,6 +69,11 @@ class Config:
             auth_type = self._parser.get(
                 section=section, option="auth_type", fallback="pat"
             )
+            issue_jql = self._parser.get(
+                section=section,
+                option="issue_jql",
+                fallback=DEFAULT_ISSUE_JQL,
+            )
 
             if auth_type == "pat":
                 pat = self._parser.get(section=section, option="pat", fallback="")
@@ -67,7 +82,13 @@ class Config:
                         f'The config file {self.config_path} must define a non-empty PAT for section "{section}".'
                     )
                 self.servers.append(
-                    Server(auth_type=auth_type, url=url, name=section, pat=pat)
+                    Server(
+                        auth_type=auth_type,
+                        url=url,
+                        name=section,
+                        pat=pat,
+                        issue_jql=issue_jql,
+                    )
                 )
                 continue
 
@@ -87,6 +108,7 @@ class Config:
                         name=section,
                         email=email,
                         api_token=api_token,
+                        issue_jql=issue_jql,
                     )
                 )
                 continue
@@ -108,6 +130,7 @@ class Config:
         self._parser.add_section(section=section)
         self._parser.set(section=section, option="url", value=s.url)
         self._parser.set(section=section, option="auth_type", value=s.auth_type)
+        self._parser.set(section=section, option="issue_jql", value=s.issue_jql)
 
         if s.auth_type == "pat":
             self._parser.set(section=section, option="pat", value=s.pat)
@@ -177,6 +200,17 @@ def add_new_server_questions(c: Config) -> Server:
         .strip()
     )
 
+    issue_jql = (
+        questionary.text(
+            message="Which JQL should be used to list issues by default?",
+            default=DEFAULT_ISSUE_JQL,
+        )
+        .unsafe_ask()
+        .strip()
+    )
+    if not issue_jql:
+        issue_jql = DEFAULT_ISSUE_JQL
+
     if auth_type == "pat":
         # For a new PAT go to:
         # https://issues.redhat.com/secure/ViewProfile.jspa?selectedTab=com.atlassian.pats.pats-plugin:jira-user-personal-access-tokens
@@ -192,7 +226,13 @@ def add_new_server_questions(c: Config) -> Server:
             "The token is stored unencrypted in ~/.config/jira-worklogger/jira-worklogger.conf.",
             style="fg:ansiyellow",
         )
-        return Server(auth_type="pat", url=url, name=name, pat=pat)
+        return Server(
+            auth_type="pat",
+            url=url,
+            name=name,
+            pat=pat,
+            issue_jql=issue_jql,
+        )
 
     email = (
         questionary.text(
@@ -221,6 +261,7 @@ def add_new_server_questions(c: Config) -> Server:
         name=name,
         email=email,
         api_token=api_token,
+        issue_jql=issue_jql,
     )
 
 
@@ -345,28 +386,102 @@ def main(
         "description",
     ]
 
-    # List all open issue by the current user
-    issues: ResultList[Issue] = jira.search_issues(
-        jql_str="assignee=currentUser() AND statusCategory not in (Done)",
-        fields=pull_issue_fields,  # or simply comment out to get all fields
-    )
+    base_issue_jql = server.issue_jql or DEFAULT_ISSUE_JQL
 
-    # Build list of issues to select from
-    issue_choices = [
-        questionary.Choice(
-            title=f"{issue.key} - {issue.fields.summary}",
-            description=f"Status: {issue.fields.status}",
-            value=f"{issue.key}",
+    issue_pool: dict[str, Issue] = {}
+    issue_order: list[str] = []
+    issue_key_pattern = re.compile(r"^[A-Z][A-Z0-9_]*-\d+$")
+
+    def add_issues_to_pool(new_issues: ResultList[Issue]) -> int:
+        added = 0
+        for issue in new_issues:
+            if issue.key not in issue_pool:
+                issue_order.append(issue.key)
+                added += 1
+            issue_pool[issue.key] = issue
+        return added
+
+    def run_search_with_jql(jql_to_run: str) -> None:
+        logging.debug("Searching Jira with JQL: %s", jql_to_run)
+        try:
+            search_results: ResultList[Issue] = jira.search_issues(
+                jql_str=jql_to_run,
+                fields=pull_issue_fields,
+                maxResults=SEARCH_RESULT_LIMIT,
+            )
+        except JIRAError as ex:
+            questionary.print(
+                f"Failed to run JQL search: {ex.text}",
+                style="fg:ansired",
+            )
+            return
+
+        added = add_issues_to_pool(search_results)
+        if len(search_results) == 0:
+            questionary.print(
+                "No issues matched that search.",
+                style="fg:ansiyellow",
+            )
+        elif added == 0:
+            questionary.print(
+                "All matching issues were already listed.",
+                style="fg:ansiyellow",
+            )
+        else:
+            questionary.print(
+                f"Added {added} issue(s) from the search.",
+                style="fg:ansigreen",
+            )
+
+    def build_keyword_search_jql(term: str) -> str:
+        escaped_term = term.replace('"', '\\"')
+        clauses = [
+            f'summary ~ "{escaped_term}"',
+            f'description ~ "{escaped_term}"',
+        ]
+        normalized_key = term.strip().upper()
+        if issue_key_pattern.match(normalized_key):
+            clauses.insert(0, f'key = "{normalized_key}"')
+        return " OR ".join(clauses) + " ORDER BY updated DESC"
+
+    def build_issue_choices() -> list[questionary.Choice | questionary.Separator]:
+        choices: list[questionary.Choice | questionary.Separator] = [
+            questionary.Choice(
+                title=f"{issue_pool[key].key} - {issue_pool[key].fields.summary}",
+                description=f"Status: {issue_pool[key].fields.status}",
+                value=issue_pool[key].key,
+            )
+            for key in issue_order
+        ]
+        if issue_order:
+            choices.append(questionary.Separator())
+        choices.append(
+            questionary.Choice(
+                title="Search Jira by keywords...",
+                description="Run a quick summary/description search",
+                value=SEARCH_BY_TEXT_VALUE,
+            )
         )
-        for issue in issues
-    ]
-    issue_choices.append(questionary.Separator())
-    issue_choices.append(
-        questionary.Choice(
-            title="My issue is not listed, enter manually",
-            value="manually_enter_issue_key",
+        choices.append(
+            questionary.Choice(
+                title="Search Jira with custom JQL...",
+                description="Paste or type any JQL query",
+                value=SEARCH_BY_JQL_VALUE,
+            )
         )
+        choices.append(
+            questionary.Choice(
+                title="My issue is not listed, enter manually",
+                value=MANUAL_ENTRY_VALUE,
+            )
+        )
+        return choices
+
+    initial_issues: ResultList[Issue] = jira.search_issues(
+        jql_str=base_issue_jql,
+        fields=pull_issue_fields,
     )
+    add_issues_to_pool(initial_issues)
 
     # Repeatedly ask for which issue to select and make sure it is found in case the
     # issue key was entered manually.
@@ -376,8 +491,8 @@ def main(
         try:
             issue_keys = questionary.checkbox(
                 message="Which issue(s) do you work on?",
-                instruction="You can use the arrow keys to select an issue or start to type to filter the list. If your issue is not in the list, select the bottom option to enter the JIRA key manually.",
-                choices=issue_choices,
+                instruction="Use arrows to select issues, type to filter, or choose a search option below to load more results.",
+                choices=build_issue_choices(),
                 use_search_filter=True,
                 use_jk_keys=False,  # Has to be disabled when using search filter,
             ).unsafe_ask()
@@ -386,25 +501,69 @@ def main(
             sys.exit(1)
 
         # Check if anything was selected
-        if issue_keys is None or issue_keys == []:
+        if not issue_keys:
             continue
 
-        if issue_keys == ["manually_enter_issue_keys"]:
-            issue_keys = [
+        if SEARCH_BY_TEXT_VALUE in issue_keys:
+            search_term = (
                 questionary.text(
-                    message="What is the key you work on?",
-                    instruction="e.g. JIRA-1234",
-                    validate=lambda text: (
-                        True if len(text) > 0 else "Please enter a value"
-                    ),
-                ).unsafe_ask()
-            ]
+                    message="Search term to look for in Jira:",
+                    instruction="Matches summary and description; include issue key to find it directly.",
+                    validate=lambda text: True if len(text.strip()) > 0 else "Please enter a value",
+                )
+                .unsafe_ask()
+                .strip()
+            )
+            if search_term:
+                keyword_jql = build_keyword_search_jql(search_term)
+                run_search_with_jql(keyword_jql)
+            continue
+
+        if SEARCH_BY_JQL_VALUE in issue_keys:
+            custom_jql = (
+                questionary.text(
+                    message="Enter the JQL to run:",
+                    multiline=True,
+                    instruction="Example: project = ABC AND statusCategory != Done",
+                    validate=lambda text: True if len(text.strip()) > 0 else "Please enter a value",
+                )
+                .unsafe_ask()
+                .strip()
+            )
+            if custom_jql:
+                run_search_with_jql(custom_jql)
+            continue
+
+        selected_keys: list[str] = []
+        for value in issue_keys:
+            if value == MANUAL_ENTRY_VALUE:
+                manual_key = (
+                    questionary.text(
+                        message="What is the key you work on?",
+                        instruction="e.g. JIRA-1234",
+                        validate=lambda text: (
+                            True if len(text) > 0 else "Please enter a value"
+                        ),
+                    )
+                    .unsafe_ask()
+                    .strip()
+                )
+                if manual_key:
+                    selected_keys.append(manual_key)
+                continue
+
+            selected_keys.append(value)
+
+        issue_keys = list(dict.fromkeys(selected_keys))
+
+        if not issue_keys:
+            continue
 
         # Load selected issues to ensure they all exist
         # TODO(kwk): Can we do this in parallel somehow?
         try:
             for issue_key in issue_keys:
-                logging.debug(f"Loading issue f{issue_key}")
+                logging.debug(f"Loading issue {issue_key}")
                 jira.issue(id=issue_key, fields=["id", "key"])
         except JIRAError as ex:
             questionary.print(
