@@ -98,6 +98,8 @@ issues. The built-in views currently include:
   time.
 - Within any issue list, choose **Back to view selector** (shortcut `b`) to
   return without changing your current selection.
+- While Jira searches are running you’ll see a spinner indicating that tickets
+  are being loaded.
 
 After each successful selection, the CLI asks whether you want to **Log time now**
 or keep browsing. Pick the new option to jump straight into either the timer or

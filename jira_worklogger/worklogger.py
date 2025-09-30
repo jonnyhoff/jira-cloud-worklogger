@@ -1,22 +1,23 @@
 #!/bin/env python3
 
-import logging.config
-from jira import JIRA
-from jira.client import ResultList
-from jira.resources import Issue
-from jira.exceptions import JIRAError
-from halo import Halo
-import questionary
-import sys
-import pathlib
-import logging
-import datetime
 import configparser
 import dataclasses
-from dataclasses import field
-from collections.abc import Callable
-from typing import Any
+import datetime
+import logging
+import logging.config
+import pathlib
 import re
+import sys
+from collections.abc import Callable
+from dataclasses import field
+from typing import Any
+
+import questionary
+from halo import Halo
+from jira import JIRA
+from jira.client import ResultList
+from jira.exceptions import JIRAError
+from jira.resources import Issue
 
 logging.basicConfig(level=logging.INFO)
 
@@ -175,7 +176,9 @@ class Config:
         self._parser.set(section=section, option="url", value=s.url)
         self._parser.set(section=section, option="auth_type", value=s.auth_type)
         self._parser.set(section=section, option="issue_jql", value=s.issue_jql)
-        self._parser.set(section=section, option="team_issue_jql", value=s.team_issue_jql)
+        self._parser.set(
+            section=section, option="team_issue_jql", value=s.team_issue_jql
+        )
         self._parser.set(
             section=section,
             option="project_keys",
@@ -278,11 +281,7 @@ def add_new_server_questions(c: Config) -> Server:
         .unsafe_ask()
         .strip()
     )
-    project_keys = [
-        key.strip()
-        for key in project_keys_input.split(",")
-        if key.strip()
-    ]
+    project_keys = [key.strip() for key in project_keys_input.split(",") if key.strip()]
 
     if auth_type == "pat":
         # For a new PAT go to:
@@ -481,6 +480,8 @@ def main(
         else:
             search_kwargs["maxResults"] = limit
 
+        spinner = Halo(text="Loading issues...", spinner="pong")
+        spinner.start()
         try:
             search_results: ResultList[Issue] = jira.search_issues(**search_kwargs)
         except JIRAError as ex:
@@ -489,6 +490,8 @@ def main(
                 style="fg:ansired",
             )
             return []
+        finally:
+            spinner.stop()
 
         issues = list(search_results)
         for issue in issues:
@@ -506,7 +509,9 @@ def main(
             clauses.insert(0, f'key = "{normalized_key}"')
         return " OR ".join(clauses) + " ORDER BY updated DESC"
 
-    def issue_choices_for_view(issues: list[Issue]) -> list[questionary.Choice | questionary.Separator]:
+    def issue_choices_for_view(
+        issues: list[Issue],
+    ) -> list[questionary.Choice | questionary.Separator]:
         choices: list[questionary.Choice | questionary.Separator] = [
             questionary.Choice(
                 title=f"{issue.key} - {issue.fields.summary}",
@@ -674,7 +679,9 @@ def main(
             questionary.text(
                 message="Enter the Jira issue key:",
                 instruction="For example: TEAM-123",
-                validate=lambda text: True if len(text.strip()) > 0 else "Please enter a value",
+                validate=lambda text: True
+                if len(text.strip()) > 0
+                else "Please enter a value",
             )
             .unsafe_ask()
             .strip()
@@ -711,9 +718,7 @@ def main(
         ).unsafe_ask()
 
         updated_set = set(updated_selection)
-        nonlocal_selected = [
-            key for key in selected_issue_keys if key in updated_set
-        ]
+        nonlocal_selected = [key for key in selected_issue_keys if key in updated_set]
         selected_issue_keys.clear()
         selected_issue_keys.extend(nonlocal_selected)
         selected_issue_set.clear()
@@ -835,7 +840,9 @@ def main(
                 questionary.text(
                     message="Search term to look for in Jira:",
                     instruction="Matches summary and description; include issue key to find it directly.",
-                    validate=lambda text: True if len(text.strip()) > 0 else "Please enter a value",
+                    validate=lambda text: True
+                    if len(text.strip()) > 0
+                    else "Please enter a value",
                 )
                 .unsafe_ask()
                 .strip()
@@ -865,7 +872,9 @@ def main(
                     message="Enter the JQL to run:",
                     multiline=True,
                     instruction="Example: project = ABC AND statusCategory != Done",
-                    validate=lambda text: True if len(text.strip()) > 0 else "Please enter a value",
+                    validate=lambda text: True
+                    if len(text.strip()) > 0
+                    else "Please enter a value",
                 )
                 .unsafe_ask()
                 .strip()
@@ -909,9 +918,7 @@ def main(
             logging.debug(f"Loading issue {issue_key}")
             jira.issue(id=issue_key, fields=["id", "key"])
     except JIRAError as ex:
-        questionary.print(
-            f"Failed to find issue with key '{issue_keys}': {ex.text}"
-        )
+        questionary.print(f"Failed to find issue with key '{issue_keys}': {ex.text}")
         questionary.print("Please run the tool again and verify your selections.")
         sys.exit(1)
     logging.debug("All issues exist")
@@ -960,7 +967,7 @@ def main(
         )
         spinner = Halo(
             text="Tracking time...",
-            spinner="dots",
+            spinner="dots12",
         )
         spinner.start()
         try:
