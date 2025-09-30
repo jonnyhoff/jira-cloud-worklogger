@@ -23,10 +23,11 @@ First time setup and automatic time logging
 
 This demonstration shows how `jira-worklogger` is set up for the first time and
 then used to track the time you spent on a JIRA issue automatically. For this,
-select at least one issue from your open issues list start the timer. Leave the
-terminal open and start working on your issue. When you're done with your work,
-come back and press any key to stop the time and log the time in JIRA togethe
-with an optional comment.
+select at least one issue from your open issues list and start the timer. Leave the
+terminal open and start working on your issue. A spinner will show that the timer is
+running. When you're done with your work, come back and press Enter in the
+terminal to stop the timer, then log the time in JIRA together with an optional
+comment.
 
 ![](docs/screencapture/automatic-time-logging.gif)
 
@@ -97,6 +98,10 @@ issues. The built-in views currently include:
   time.
 - Within any issue list, choose **Back to view selector** (shortcut `b`) to
   return without changing your current selection.
+
+After each successful selection, the CLI asks whether you want to **Log time now**
+or keep browsing. Pick the new option to jump straight into either the timer or
+manual entry flow without revisiting the view selector.
 
 You can configure these views during server setup or later by editing the
 section inside `~/.config/jira-worklogger/jira-worklogger.conf`:
