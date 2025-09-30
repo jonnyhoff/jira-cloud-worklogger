@@ -23,6 +23,16 @@ class Server:
     url: str
     name: str
     pat: str = ""
+    email: str = ""
+    api_token: str = ""
+
+    def __post_init__(self) -> None:
+        self.auth_type = self.auth_type.strip()
+        self.url = self.url.strip()
+        self.name = self.name.strip()
+        self.pat = self.pat.strip()
+        self.email = self.email.strip()
+        self.api_token = self.api_token.strip()
 
 
 class Config:
@@ -45,14 +55,43 @@ class Config:
         self.servers: list[Server] = []
         for section in self._parser.sections():
             url = self._parser.get(section=section, option="url")
-            auth_type = self._parser.get(section=section, option="auth_type")
-            if auth_type != "pat":
-                raise Exception(
-                    f"""The config file {self.config_path} has set the "auth_type" for section "{section}" to "{auth_type}" but only "pat" is supported now."""
+            auth_type = self._parser.get(
+                section=section, option="auth_type", fallback="pat"
+            )
+
+            if auth_type == "pat":
+                pat = self._parser.get(section=section, option="pat", fallback="")
+                if not pat:
+                    raise Exception(
+                        f"The config file {self.config_path} must define a non-empty PAT for section \"{section}\"."
+                    )
+                self.servers.append(
+                    Server(auth_type=auth_type, url=url, name=section, pat=pat)
                 )
-            pat = self._parser.get(section=section, option="pat")
-            self.servers.append(
-                Server(auth_type=auth_type, url=url, name=section, pat=pat)
+                continue
+
+            if auth_type == "cloud_token":
+                email = self._parser.get(section=section, option="email", fallback="")
+                api_token = self._parser.get(
+                    section=section, option="api_token", fallback=""
+                )
+                if not email or not api_token:
+                    raise Exception(
+                        f"The config file {self.config_path} must define both an email and API token for section \"{section}\"."
+                    )
+                self.servers.append(
+                    Server(
+                        auth_type=auth_type,
+                        url=url,
+                        name=section,
+                        email=email,
+                        api_token=api_token,
+                    )
+                )
+                continue
+
+            raise Exception(
+                f"""The config file {self.config_path} has set the "auth_type" for section "{section}" to "{auth_type}" but only "pat" and "cloud_token" are supported now."""
             )
 
     def write(self, autoreload: bool = True) -> None:
@@ -63,10 +102,19 @@ class Config:
 
     def add_server(self, s: Server) -> None:
         section = s.name
+        if self._parser.has_section(section):
+            self._parser.remove_section(section)
         self._parser.add_section(section=section)
         self._parser.set(section=section, option="url", value=s.url)
-        self._parser.set(section=section, option="auth_type", value="pat")
-        self._parser.set(section=section, option="pat", value=s.pat)
+        self._parser.set(section=section, option="auth_type", value=s.auth_type)
+
+        if s.auth_type == "pat":
+            self._parser.set(section=section, option="pat", value=s.pat)
+        elif s.auth_type == "cloud_token":
+            self._parser.set(section=section, option="email", value=s.email)
+            self._parser.set(section=section, option="api_token", value=s.api_token)
+        else:
+            raise ValueError(f"Unsupported auth_type '{s.auth_type}' for server '{s.name}'")
         self.write()
 
 def validate_server_name(c: Config) -> Callable[[str], str|bool]:
@@ -90,29 +138,117 @@ def validate_server_name(c: Config) -> Callable[[str], str|bool]:
 def add_new_server_questions(c: Config) -> Server:
     url = questionary.text(
         message="Which JIRA server to connect to?",
-        default="https://issues.redhat.com",
+        default="https://your-instance.atlassian.net",
         validate=lambda text: (
             True if len(text) > 0 else "Please, enter a JIRA server"
         ),
+    ).unsafe_ask().strip()
+    auth_type = questionary.select(
+        message="Which authentication method do you want to configure?",
+        default="cloud_token",
+        choices=[
+            questionary.Choice(
+                title="Jira Cloud - Email and API token",
+                value="cloud_token",
+            ),
+            questionary.Choice(
+                title="Jira Server / Data Center - Personal Access Token",
+                value="pat",
+            ),
+        ],
     ).unsafe_ask()
     name = questionary.text(
         message="What name to give your server?",
         default="Red Hat",
         validate=validate_server_name(c),
-    ).unsafe_ask()
-    # For a new PAT go to:
-    # https://issues.redhat.com/secure/ViewProfile.jspa?selectedTab=com.atlassian.pats.pats-plugin:jira-user-personal-access-tokens
-    pat = questionary.password(
-        message="What is your JIRA Personal Access Token (PAT)?",
+    ).unsafe_ask().strip()
+
+    if auth_type == "pat":
+        # For a new PAT go to:
+        # https://issues.redhat.com/secure/ViewProfile.jspa?selectedTab=com.atlassian.pats.pats-plugin:jira-user-personal-access-tokens
+        pat = questionary.password(
+            message="What is your JIRA Personal Access Token (PAT)?",
+            validate=lambda text: True if len(text) > 0 else "Please enter a value",
+        ).unsafe_ask().strip()
+        questionary.print(
+            "The token is stored unencrypted in ~/.config/jira-worklogger/jira-worklogger.conf.",
+            style="fg:ansiyellow",
+        )
+        return Server(auth_type="pat", url=url, name=name, pat=pat)
+
+    email = questionary.text(
+        message="What is your Atlassian account email?",
         validate=lambda text: True if len(text) > 0 else "Please enter a value",
-    ).unsafe_ask()
-    return Server(auth_type="pat", url=url, name=name, pat=pat)
+    ).unsafe_ask().strip()
+    api_token = questionary.password(
+        message="What is your Jira Cloud API token?",
+        instruction="Create one at https://id.atlassian.com/manage-profile/security/api-tokens",
+        validate=lambda text: True if len(text) > 0 else "Please enter a value",
+    ).unsafe_ask().strip()
+    questionary.print(
+        "The email and API token are stored unencrypted in ~/.config/jira-worklogger/jira-worklogger.conf.",
+        style="fg:ansiyellow",
+    )
+    return Server(
+        auth_type="cloud_token",
+        url=url,
+        name=name,
+        email=email,
+        api_token=api_token,
+    )
 
 
 def add_new_server(c: Config) -> None:
     """Asks a few questions to add a new server configuration to the config"""
     s = add_new_server_questions(c)
     c.add_server(s)
+
+
+def connect_to_jira(server: Server) -> tuple[JIRA, dict[str, Any]]:
+    """Create an authenticated JIRA client for the given server configuration."""
+
+    def _attempt_connection(**auth_kwargs: Any) -> tuple[JIRA, dict[str, Any]]:
+        client = JIRA(server=server.url, **auth_kwargs)
+        profile = client.myself()
+        return client, profile
+
+    if server.auth_type == "pat":
+        return _attempt_connection(token_auth=server.pat)
+
+    if server.auth_type == "cloud_token":
+        errors: list[JIRAError] = []
+        auth_attempts: list[tuple[str, dict[str, Any]]] = []
+        if server.email and server.api_token:
+            auth_attempts.append(
+                (
+                    "email+api_token",
+                    {"basic_auth": (server.email, server.api_token)},
+                )
+            )
+        if server.api_token:
+            auth_attempts.append(("bearer", {"token_auth": server.api_token}))
+
+        for method, kwargs in auth_attempts:
+            try:
+                return _attempt_connection(**kwargs)
+            except JIRAError as ex:
+                if ex.status_code == 401:
+                    logging.debug(
+                        "Authentication method '%s' failed for server '%s': %s",
+                        method,
+                        server.name,
+                        ex.text,
+                    )
+                    errors.append(ex)
+                    continue
+                raise
+
+        if errors:
+            raise errors[-1]
+
+    raise ValueError(
+        f"Unsupported authentication type '{server.auth_type}' for server '{server.name}'."
+    )
 
 
 def main(args:dict[str, str]|None=None, server: Server|None=None, jira:JIRA|None=None, myself:dict[str,Any]|None=None) -> None:
@@ -139,16 +275,30 @@ def main(args:dict[str, str]|None=None, server: Server|None=None, jira:JIRA|None
         else:
             server = s
 
+    assert server is not None
+
     # Some Authentication Methods
     if jira == None:
-        jira = JIRA(
-            server=server.url,
-            token_auth=server.pat,
-        )
+        try:
+            jira, myself = connect_to_jira(server)
+        except JIRAError as ex:
+            if ex.status_code == 401:
+                questionary.print(
+                    "Authentication failed. Please verify your credentials or reconfigure the server.",
+                    style="fg:ansired",
+                )
+                sys.exit(1)
+            raise
 
     # Who has authenticated
     if myself == None:
-        myself = jira.myself()
+        try:
+            myself = jira.myself()
+        except JIRAError as ex:
+            if ex.status_code == 401:
+                jira, myself = connect_to_jira(server)
+            else:
+                raise
         logging.debug(
             f"You're authenticated with JIRA ({server.url}) as: {myself['name']} - {myself['displayName']} ({myself['emailAddress']})"
         )

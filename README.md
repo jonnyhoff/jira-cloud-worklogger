@@ -60,13 +60,23 @@ In JIRA the result from the two time logs will look like this:
 Usage
 -----
 
+### Jira Cloud API token
+
+When configuring a Jira Cloud site choose the "Jira Cloud - Email and API token"
+authentication option. You will be asked for your Atlassian account email address
+and an API token. Create or manage API tokens at
+<https://id.atlassian.com/manage-profile/security/api-tokens>.
+
 ### Personal access token (PAT)
 
-In order to acquire a personal access token for use with `jira-worklogger` you
-have to go to
+For Jira Server and Data Center instances choose the "Jira Server / Data Center -
+Personal Access Token" option. To acquire a personal access token you have to go to
 `https://<YOUR_JIRA_SERVER>/secure/ViewProfile.jspa?selectedTab=com.atlassian.pats.pats-plugin:jira-user-personal-access-tokens`.
 
 For the Red Hat issues, that is [here](https://issues.redhat.com/secure/ViewProfile.jspa?selectedTab=com.atlassian.pats.pats-plugin:jira-user-personal-access-tokens).
+
+> **Security note:** The credentials you enter during setup are written to
+> `~/.config/jira-worklogger/jira-worklogger.conf` in plain text.
 
 ### Run from source
 
