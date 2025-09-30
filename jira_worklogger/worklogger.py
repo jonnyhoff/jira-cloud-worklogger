@@ -208,7 +208,10 @@ def connect_to_jira(server: Server) -> tuple[JIRA, dict[str, Any]]:
     """Create an authenticated JIRA client for the given server configuration."""
 
     def _attempt_connection(**auth_kwargs: Any) -> tuple[JIRA, dict[str, Any]]:
-        client = JIRA(server=server.url, **auth_kwargs)
+        get_server_info = auth_kwargs.pop("get_server_info", True)
+        client = JIRA(server=server.url, get_server_info=get_server_info, **auth_kwargs)
+        if not get_server_info and server.auth_type == "cloud_token":
+            client.deploymentType = "Cloud"
         profile = client.myself()
         return client, profile
 
@@ -222,21 +225,30 @@ def connect_to_jira(server: Server) -> tuple[JIRA, dict[str, Any]]:
             auth_attempts.append(
                 (
                     "email+api_token",
-                    {"basic_auth": (server.email, server.api_token)},
+                    {
+                        "basic_auth": (server.email, server.api_token),
+                        "get_server_info": False,
+                    },
                 )
             )
         if server.api_token:
-            auth_attempts.append(("bearer", {"token_auth": server.api_token}))
+            auth_attempts.append(
+                (
+                    "bearer",
+                    {"token_auth": server.api_token, "get_server_info": False},
+                )
+            )
 
         for method, kwargs in auth_attempts:
             try:
                 return _attempt_connection(**kwargs)
             except JIRAError as ex:
-                if ex.status_code == 401:
+                if ex.status_code in (401, 403):
                     logging.debug(
-                        "Authentication method '%s' failed for server '%s': %s",
+                        "Authentication method '%s' failed for server '%s' (HTTP %s): %s",
                         method,
                         server.name,
+                        ex.status_code,
                         ex.text,
                     )
                     errors.append(ex)
@@ -282,7 +294,7 @@ def main(args:dict[str, str]|None=None, server: Server|None=None, jira:JIRA|None
         try:
             jira, myself = connect_to_jira(server)
         except JIRAError as ex:
-            if ex.status_code == 401:
+            if ex.status_code in (401, 403):
                 questionary.print(
                     "Authentication failed. Please verify your credentials or reconfigure the server.",
                     style="fg:ansired",
@@ -295,7 +307,7 @@ def main(args:dict[str, str]|None=None, server: Server|None=None, jira:JIRA|None
         try:
             myself = jira.myself()
         except JIRAError as ex:
-            if ex.status_code == 401:
+            if ex.status_code in (401, 403):
                 jira, myself = connect_to_jira(server)
             else:
                 raise
