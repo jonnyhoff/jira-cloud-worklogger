@@ -34,6 +34,12 @@ VIEW_REVIEW_SELECTION = "__view_review_selection__"
 VIEW_FINISH_SELECTION = "__view_finish_selection__"
 
 
+@dataclasses.dataclass(frozen=True)
+class SelectionResult:
+    back_to_view_selector: bool
+    selection_changed: bool
+
+
 @dataclasses.dataclass(kw_only=True)
 class Server:
     auth_type: str = "pat"
@@ -620,17 +626,21 @@ def main(
         *,
         issues: list[Issue],
         prompt_message: str,
-    ) -> bool:
+    ) -> SelectionResult:
         if not issues:
             questionary.print(
                 "No issues matched that choice.",
                 style="fg:ansiyellow",
             )
-            return True
+            return SelectionResult(
+                back_to_view_selector=False,
+                selection_changed=False,
+            )
 
         for issue in issues:
             issue_cache[issue.key] = issue
 
+        previous_selection = set(selected_issue_set)
         choices = issue_choices_for_view(issues)
         selected_values = questionary.checkbox(
             message=prompt_message,
@@ -641,16 +651,24 @@ def main(
         ).unsafe_ask()
 
         if RETURN_TO_VIEWS_VALUE in selected_values:
-            return False
+            return SelectionResult(
+                back_to_view_selector=True,
+                selection_changed=False,
+            )
 
         selected_values = [
             value for value in selected_values if value != RETURN_TO_VIEWS_VALUE
         ]
 
         sync_selection_from_view([issue.key for issue in issues], selected_values)
-        return True
+        selection_changed = previous_selection != selected_issue_set
+        return SelectionResult(
+            back_to_view_selector=False,
+            selection_changed=selection_changed,
+        )
 
-    def prompt_manual_issue_key() -> None:
+    def prompt_manual_issue_key() -> bool:
+        previous_selection = set(selected_issue_set)
         manual_key = (
             questionary.text(
                 message="Enter the Jira issue key:",
@@ -662,21 +680,23 @@ def main(
             .upper()
         )
         if not manual_key:
-            return
+            return False
         if manual_key in selected_issue_set:
             questionary.print(
                 f"Issue {manual_key} is already selected.",
                 style="fg:ansiyellow",
             )
-            return
+            return False
         selected_issue_set.add(manual_key)
         selected_issue_keys.append(manual_key)
+        return previous_selection != selected_issue_set
 
-    def review_current_selection() -> None:
+    def review_current_selection() -> bool:
         if not selected_issue_keys:
             questionary.print("No issues selected yet.", style="fg:ansiyellow")
-            return
+            return False
 
+        previous_selection = set(selected_issue_set)
         review_choices = [
             questionary.Choice(title=key, value=key, checked=True)
             for key in selected_issue_keys
@@ -697,6 +717,7 @@ def main(
         selected_issue_keys.extend(nonlocal_selected)
         selected_issue_set.clear()
         selected_issue_set.update(updated_set)
+        return previous_selection != selected_issue_set
 
     def project_jql() -> str | None:
         if not server.project_keys:
@@ -704,21 +725,49 @@ def main(
         project_list = ", ".join(server.project_keys)
         return f"project in ({project_list}) AND statusCategory not in (Done)"
 
-    while True:
+    def maybe_prompt_to_start_logging() -> bool:
+        if not selected_issue_keys:
+            return False
+
+        next_action = questionary.select(
+            message=f"{len(selected_issue_keys)} issue(s) selected. What next?",
+            choices=[
+                questionary.Choice(
+                    title="Log time now",
+                    description="Jump straight to timer/manual entry options.",
+                    value="log",
+                    shortcut_key="l",
+                ),
+                questionary.Choice(
+                    title="Keep selecting issues",
+                    value="keep",
+                    shortcut_key="k",
+                ),
+            ],
+        ).unsafe_ask()
+        return next_action == "log"
+
+    proceed_to_logging = False
+    while not proceed_to_logging:
         view_choice = questionary.select(
             message="How would you like to find issues?",
             choices=build_view_choices(),
         ).unsafe_ask()
 
         if view_choice == VIEW_FINISH_SELECTION:
+            proceed_to_logging = True
             break
 
         if view_choice == VIEW_REVIEW_SELECTION:
-            review_current_selection()
+            if review_current_selection() and maybe_prompt_to_start_logging():
+                proceed_to_logging = True
+                break
             continue
 
         if view_choice == MANUAL_ENTRY_VALUE:
-            prompt_manual_issue_key()
+            if prompt_manual_issue_key() and maybe_prompt_to_start_logging():
+                proceed_to_logging = True
+                break
             continue
 
         if view_choice == VIEW_MY_ISSUES:
@@ -728,11 +777,15 @@ def main(
                 f"Loaded {len(issues)} issue(s) assigned to you.",
                 style="fg:ansigreen" if issues else "fg:ansiyellow",
             )
-            if not prompt_and_sync_from_issues(
+            result = prompt_and_sync_from_issues(
                 issues=issues,
                 prompt_message="Select from your assigned issues",
-            ):
+            )
+            if result.back_to_view_selector:
                 continue
+            if result.selection_changed and maybe_prompt_to_start_logging():
+                proceed_to_logging = True
+                break
             continue
 
         if view_choice == VIEW_TEAM_ISSUES:
@@ -741,11 +794,15 @@ def main(
                 f"Loaded {len(issues)} team issue(s).",
                 style="fg:ansigreen" if issues else "fg:ansiyellow",
             )
-            if not prompt_and_sync_from_issues(
+            result = prompt_and_sync_from_issues(
                 issues=issues,
                 prompt_message="Select shared/team issues",
-            ):
+            )
+            if result.back_to_view_selector:
                 continue
+            if result.selection_changed and maybe_prompt_to_start_logging():
+                proceed_to_logging = True
+                break
             continue
 
         if view_choice == VIEW_PROJECT_ISSUES:
@@ -761,11 +818,15 @@ def main(
                 f"Loaded {len(issues)} project issue(s).",
                 style="fg:ansigreen" if issues else "fg:ansiyellow",
             )
-            if not prompt_and_sync_from_issues(
+            result = prompt_and_sync_from_issues(
                 issues=issues,
                 prompt_message="Select project issues",
-            ):
+            )
+            if result.back_to_view_selector:
                 continue
+            if result.selection_changed and maybe_prompt_to_start_logging():
+                proceed_to_logging = True
+                break
             continue
 
         if view_choice == SEARCH_BY_TEXT_VALUE:
@@ -786,11 +847,15 @@ def main(
                 f"Loaded {len(issues)} issue(s) from keyword search.",
                 style="fg:ansigreen" if issues else "fg:ansiyellow",
             )
-            if not prompt_and_sync_from_issues(
+            result = prompt_and_sync_from_issues(
                 issues=issues,
                 prompt_message="Select issues from keyword search",
-            ):
+            )
+            if result.back_to_view_selector:
                 continue
+            if result.selection_changed and maybe_prompt_to_start_logging():
+                proceed_to_logging = True
+                break
             continue
 
         if view_choice == SEARCH_BY_JQL_VALUE:
@@ -811,11 +876,15 @@ def main(
                 f"Loaded {len(issues)} issue(s) from custom JQL.",
                 style="fg:ansigreen" if issues else "fg:ansiyellow",
             )
-            if not prompt_and_sync_from_issues(
+            result = prompt_and_sync_from_issues(
                 issues=issues,
                 prompt_message="Select issues from custom JQL",
-            ):
+            )
+            if result.back_to_view_selector:
                 continue
+            if result.selection_changed and maybe_prompt_to_start_logging():
+                proceed_to_logging = True
+                break
             continue
 
         questionary.print(
