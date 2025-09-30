@@ -17,6 +17,7 @@ from typing import Any
 
 logging.basicConfig(level=logging.INFO)
 
+
 @dataclasses.dataclass(kw_only=True)
 class Server:
     auth_type: str = "pat"
@@ -63,7 +64,7 @@ class Config:
                 pat = self._parser.get(section=section, option="pat", fallback="")
                 if not pat:
                     raise Exception(
-                        f"The config file {self.config_path} must define a non-empty PAT for section \"{section}\"."
+                        f'The config file {self.config_path} must define a non-empty PAT for section "{section}".'
                     )
                 self.servers.append(
                     Server(auth_type=auth_type, url=url, name=section, pat=pat)
@@ -77,7 +78,7 @@ class Config:
                 )
                 if not email or not api_token:
                     raise Exception(
-                        f"The config file {self.config_path} must define both an email and API token for section \"{section}\"."
+                        f'The config file {self.config_path} must define both an email and API token for section "{section}".'
                     )
                 self.servers.append(
                     Server(
@@ -114,10 +115,13 @@ class Config:
             self._parser.set(section=section, option="email", value=s.email)
             self._parser.set(section=section, option="api_token", value=s.api_token)
         else:
-            raise ValueError(f"Unsupported auth_type '{s.auth_type}' for server '{s.name}'")
+            raise ValueError(
+                f"Unsupported auth_type '{s.auth_type}' for server '{s.name}'"
+            )
         self.write()
 
-def validate_server_name(c: Config) -> Callable[[str], str|bool]:
+
+def validate_server_name(c: Config) -> Callable[[str], str | bool]:
     """Returns a function that can be used to validate a server name.
 
     Args:
@@ -126,7 +130,8 @@ def validate_server_name(c: Config) -> Callable[[str], str|bool]:
     Returns:
         Callable[[str], str|bool]: A function to be used in the validate argument of a questionary text.
     """
-    def validate(name: str) -> str|bool:
+
+    def validate(name: str) -> str | bool:
         if len(name) <= 0:
             return "Please, enter a name for the server!"
         if c._parser.has_section(name):
@@ -135,14 +140,19 @@ def validate_server_name(c: Config) -> Callable[[str], str|bool]:
 
     return validate
 
+
 def add_new_server_questions(c: Config) -> Server:
-    url = questionary.text(
-        message="Which JIRA server to connect to?",
-        default="https://your-instance.atlassian.net",
-        validate=lambda text: (
-            True if len(text) > 0 else "Please, enter a JIRA server"
-        ),
-    ).unsafe_ask().strip()
+    url = (
+        questionary.text(
+            message="Which JIRA server to connect to?",
+            default="https://your-instance.atlassian.net",
+            validate=lambda text: (
+                True if len(text) > 0 else "Please, enter a JIRA server"
+            ),
+        )
+        .unsafe_ask()
+        .strip()
+    )
     auth_type = questionary.select(
         message="Which authentication method do you want to configure?",
         default="cloud_token",
@@ -157,34 +167,50 @@ def add_new_server_questions(c: Config) -> Server:
             ),
         ],
     ).unsafe_ask()
-    name = questionary.text(
-        message="What name to give your server?",
-        default="Red Hat",
-        validate=validate_server_name(c),
-    ).unsafe_ask().strip()
+    name = (
+        questionary.text(
+            message="What name to give your server?",
+            default="Red Hat",
+            validate=validate_server_name(c),
+        )
+        .unsafe_ask()
+        .strip()
+    )
 
     if auth_type == "pat":
         # For a new PAT go to:
         # https://issues.redhat.com/secure/ViewProfile.jspa?selectedTab=com.atlassian.pats.pats-plugin:jira-user-personal-access-tokens
-        pat = questionary.password(
-            message="What is your JIRA Personal Access Token (PAT)?",
-            validate=lambda text: True if len(text) > 0 else "Please enter a value",
-        ).unsafe_ask().strip()
+        pat = (
+            questionary.password(
+                message="What is your JIRA Personal Access Token (PAT)?",
+                validate=lambda text: True if len(text) > 0 else "Please enter a value",
+            )
+            .unsafe_ask()
+            .strip()
+        )
         questionary.print(
             "The token is stored unencrypted in ~/.config/jira-worklogger/jira-worklogger.conf.",
             style="fg:ansiyellow",
         )
         return Server(auth_type="pat", url=url, name=name, pat=pat)
 
-    email = questionary.text(
-        message="What is your Atlassian account email?",
-        validate=lambda text: True if len(text) > 0 else "Please enter a value",
-    ).unsafe_ask().strip()
-    api_token = questionary.password(
-        message="What is your Jira Cloud API token?",
-        instruction="Create one at https://id.atlassian.com/manage-profile/security/api-tokens",
-        validate=lambda text: True if len(text) > 0 else "Please enter a value",
-    ).unsafe_ask().strip()
+    email = (
+        questionary.text(
+            message="What is your Atlassian account email?",
+            validate=lambda text: True if len(text) > 0 else "Please enter a value",
+        )
+        .unsafe_ask()
+        .strip()
+    )
+    api_token = (
+        questionary.password(
+            message="What is your Jira Cloud API token?",
+            instruction="Create one at https://id.atlassian.com/manage-profile/security/api-tokens",
+            validate=lambda text: True if len(text) > 0 else "Please enter a value",
+        )
+        .unsafe_ask()
+        .strip()
+    )
     questionary.print(
         "The email and API token are stored unencrypted in ~/.config/jira-worklogger/jira-worklogger.conf.",
         style="fg:ansiyellow",
@@ -208,10 +234,7 @@ def connect_to_jira(server: Server) -> tuple[JIRA, dict[str, Any]]:
     """Create an authenticated JIRA client for the given server configuration."""
 
     def _attempt_connection(**auth_kwargs: Any) -> tuple[JIRA, dict[str, Any]]:
-        get_server_info = auth_kwargs.pop("get_server_info", True)
-        client = JIRA(server=server.url, get_server_info=get_server_info, **auth_kwargs)
-        if not get_server_info and server.auth_type == "cloud_token":
-            client.deploymentType = "Cloud"
+        client = JIRA(server=server.url, **auth_kwargs)
         profile = client.myself()
         return client, profile
 
@@ -225,30 +248,21 @@ def connect_to_jira(server: Server) -> tuple[JIRA, dict[str, Any]]:
             auth_attempts.append(
                 (
                     "email+api_token",
-                    {
-                        "basic_auth": (server.email, server.api_token),
-                        "get_server_info": False,
-                    },
+                    {"basic_auth": (server.email, server.api_token)},
                 )
             )
         if server.api_token:
-            auth_attempts.append(
-                (
-                    "bearer",
-                    {"token_auth": server.api_token, "get_server_info": False},
-                )
-            )
+            auth_attempts.append(("bearer", {"token_auth": server.api_token}))
 
         for method, kwargs in auth_attempts:
             try:
                 return _attempt_connection(**kwargs)
             except JIRAError as ex:
-                if ex.status_code in (401, 403):
+                if ex.status_code == 401:
                     logging.debug(
-                        "Authentication method '%s' failed for server '%s' (HTTP %s): %s",
+                        "Authentication method '%s' failed for server '%s': %s",
                         method,
                         server.name,
-                        ex.status_code,
                         ex.text,
                     )
                     errors.append(ex)
@@ -263,7 +277,12 @@ def connect_to_jira(server: Server) -> tuple[JIRA, dict[str, Any]]:
     )
 
 
-def main(args:dict[str, str]|None=None, server: Server|None=None, jira:JIRA|None=None, myself:dict[str,Any]|None=None) -> None:
+def main(
+    args: dict[str, str] | None = None,
+    server: Server | None = None,
+    jira: JIRA | None = None,
+    myself: dict[str, Any] | None = None,
+) -> None:
     """The main program"""
     config = Config()
     config.load()
@@ -273,7 +292,8 @@ def main(args:dict[str, str]|None=None, server: Server|None=None, jira:JIRA|None
 
     while server is None:
         server_choices = [
-            questionary.Choice(title=f"{s.name} - {s.url}", value=s) for s in config.servers
+            questionary.Choice(title=f"{s.name} - {s.url}", value=s)
+            for s in config.servers
         ]
         server_choices.append(questionary.Separator())
         server_choices.append(
@@ -294,7 +314,7 @@ def main(args:dict[str, str]|None=None, server: Server|None=None, jira:JIRA|None
         try:
             jira, myself = connect_to_jira(server)
         except JIRAError as ex:
-            if ex.status_code in (401, 403):
+            if ex.status_code == 401:
                 questionary.print(
                     "Authentication failed. Please verify your credentials or reconfigure the server.",
                     style="fg:ansired",
@@ -307,7 +327,7 @@ def main(args:dict[str, str]|None=None, server: Server|None=None, jira:JIRA|None
         try:
             myself = jira.myself()
         except JIRAError as ex:
-            if ex.status_code in (401, 403):
+            if ex.status_code == 401:
                 jira, myself = connect_to_jira(server)
             else:
                 raise
@@ -316,7 +336,14 @@ def main(args:dict[str, str]|None=None, server: Server|None=None, jira:JIRA|None
         )
 
     # Which field to pull from the JIRA server for each issue
-    pull_issue_fields = ["id", "key", "summary", "statusCategory", "status", "description"]
+    pull_issue_fields = [
+        "id",
+        "key",
+        "summary",
+        "statusCategory",
+        "status",
+        "description",
+    ]
 
     # List all open issue by the current user
     issues: ResultList[Issue] = jira.search_issues(
@@ -336,7 +363,8 @@ def main(args:dict[str, str]|None=None, server: Server|None=None, jira:JIRA|None
     issue_choices.append(questionary.Separator())
     issue_choices.append(
         questionary.Choice(
-            title="My issue is not listed, enter manually", value="manually_enter_issue_key"
+            title="My issue is not listed, enter manually",
+            value="manually_enter_issue_key",
         )
     )
 
@@ -379,7 +407,9 @@ def main(args:dict[str, str]|None=None, server: Server|None=None, jira:JIRA|None
                 logging.debug(f"Loading issue f{issue_key}")
                 jira.issue(id=issue_key, fields=["id", "key"])
         except JIRAError as ex:
-            questionary.print(f"Failed to find issue with key '{issue_keys}': {ex.text}")
+            questionary.print(
+                f"Failed to find issue with key '{issue_keys}': {ex.text}"
+            )
             questionary.print("Please select issues again.")
         else:
             issues_found = True
@@ -404,19 +434,19 @@ def main(args:dict[str, str]|None=None, server: Server|None=None, jira:JIRA|None
         ],
     ).unsafe_ask()
 
-    time_spent : str = "0m"
+    time_spent: str = "0m"
 
-    comment : str = ""
+    comment: str = ""
 
     if log_method == "manual":
         comment = questionary.text(
-            message="Enter an optional comment for what you've worked on:", multiline=True
+            message="Enter an optional comment for what you've worked on:",
+            multiline=True,
         ).unsafe_ask()
         time_spent = questionary.text(
             message='How much time did you time spent, e.g. "2d", or "30m"?',
             validate=lambda text: True if len(text) > 0 else "Please enter a value",
         ).unsafe_ask()
-
 
     if log_method == "auto":
         questionary.press_any_key_to_continue(
@@ -424,7 +454,8 @@ def main(args:dict[str, str]|None=None, server: Server|None=None, jira:JIRA|None
         ).unsafe_ask()
         start_time = datetime.datetime.now()
         comment = questionary.text(
-            message="Enter an optional comment for what you've worked on:", multiline=True
+            message="Enter an optional comment for what you've worked on:",
+            multiline=True,
         ).unsafe_ask()
         stop_time = datetime.datetime.now()
         seconds_spent = (stop_time - start_time).total_seconds()
@@ -434,10 +465,13 @@ def main(args:dict[str, str]|None=None, server: Server|None=None, jira:JIRA|None
     happy_with_time = False
     while not happy_with_time:
         happy_with_time = questionary.select(
-            message=f"We've tracked a total of {time_spent}. Do you want to adjust the time?", choices=[
+            message=f"We've tracked a total of {time_spent}. Do you want to adjust the time?",
+            choices=[
                 questionary.Choice(title=f"No, {time_spent} is fine.", value=True),
-                questionary.Choice(title=f"Yes, I want to adjust the time spent.", value=False)
-            ]
+                questionary.Choice(
+                    title=f"Yes, I want to adjust the time spent.", value=False
+                ),
+            ],
         ).unsafe_ask()
         if not happy_with_time:
             time_spent = questionary.text(
@@ -458,16 +492,18 @@ def main(args:dict[str, str]|None=None, server: Server|None=None, jira:JIRA|None
         questionary.print(f"Added worklog to issue {issue_key}")
 
     _continue = questionary.select(
-        message=f"Work on another ticket?", choices=[
+        message=f"Work on another ticket?",
+        choices=[
             questionary.Choice(title=f"Yes.", value=True),
-            questionary.Choice(title=f"No.", value=False)
-        ]
+            questionary.Choice(title=f"No.", value=False),
+        ],
     ).unsafe_ask()
 
     if _continue:
         main(args, server=server, jira=jira, myself=myself)
 
-def cli(args:dict[str, str]|None=None) -> None:
+
+def cli(args: dict[str, str] | None = None) -> None:
     try:
         main(args)
         questionary.print(text="Thank you for using this tool.")
