@@ -731,27 +731,57 @@ def main(
         project_list = ", ".join(server.project_keys)
         return f"project in ({project_list}) AND statusCategory not in (Done)"
 
-    def maybe_prompt_to_start_logging() -> bool:
-        if not selected_issue_keys:
-            return False
-
-        next_action = questionary.select(
-            message=f"{len(selected_issue_keys)} issue(s) selected. What next?",
-            choices=[
-                questionary.Choice(
-                    title="Log time now",
-                    description="Jump straight to timer/manual entry options.",
-                    value="log",
-                    shortcut_key="l",
-                ),
+    def prompt_log_method(
+        *, selected_count: int, allow_keep_selecting: bool
+    ) -> str:
+        message = (
+            f"{selected_count} issue(s) selected. What next?"
+            if allow_keep_selecting
+            else "How do you want to log the time?"
+        )
+        choices = [
+            questionary.Choice(
+                title="Start Timer",
+                description="Begin a timer now and stop it when you're done.",
+                value="auto",
+                shortcut_key="a",
+            ),
+            questionary.Choice(
+                title="Manual Time Entry",
+                description='Enter a duration such as "1h" or "30m".',
+                value="manual",
+                shortcut_key="m",
+            ),
+        ]
+        if allow_keep_selecting:
+            choices.append(
                 questionary.Choice(
                     title="Keep selecting issues",
+                    description="Return to issue selection.",
                     value="keep",
                     shortcut_key="k",
-                ),
-            ],
+                )
+            )
+        return questionary.select(
+            message=message,
+            default="auto",
+            choices=choices,
         ).unsafe_ask()
-        return next_action == "log"
+
+    pending_log_method: str | None = None
+
+    def prompt_log_method_after_selection_change() -> bool:
+        nonlocal pending_log_method
+        if not selected_issue_keys:
+            return False
+        next_action = prompt_log_method(
+            selected_count=len(selected_issue_keys),
+            allow_keep_selecting=True,
+        )
+        if next_action == "keep":
+            return False
+        pending_log_method = next_action
+        return True
 
     proceed_to_logging = False
     while not proceed_to_logging:
@@ -765,13 +795,13 @@ def main(
             break
 
         if view_choice == VIEW_REVIEW_SELECTION:
-            if review_current_selection() and maybe_prompt_to_start_logging():
+            if review_current_selection() and prompt_log_method_after_selection_change():
                 proceed_to_logging = True
                 break
             continue
 
         if view_choice == MANUAL_ENTRY_VALUE:
-            if prompt_manual_issue_key() and maybe_prompt_to_start_logging():
+            if prompt_manual_issue_key() and prompt_log_method_after_selection_change():
                 proceed_to_logging = True
                 break
             continue
@@ -789,7 +819,7 @@ def main(
             )
             if result.back_to_view_selector:
                 continue
-            if result.selection_changed and maybe_prompt_to_start_logging():
+            if result.selection_changed and prompt_log_method_after_selection_change():
                 proceed_to_logging = True
                 break
             continue
@@ -806,7 +836,7 @@ def main(
             )
             if result.back_to_view_selector:
                 continue
-            if result.selection_changed and maybe_prompt_to_start_logging():
+            if result.selection_changed and prompt_log_method_after_selection_change():
                 proceed_to_logging = True
                 break
             continue
@@ -830,7 +860,7 @@ def main(
             )
             if result.back_to_view_selector:
                 continue
-            if result.selection_changed and maybe_prompt_to_start_logging():
+            if result.selection_changed and prompt_log_method_after_selection_change():
                 proceed_to_logging = True
                 break
             continue
@@ -861,7 +891,7 @@ def main(
             )
             if result.back_to_view_selector:
                 continue
-            if result.selection_changed and maybe_prompt_to_start_logging():
+            if result.selection_changed and prompt_log_method_after_selection_change():
                 proceed_to_logging = True
                 break
             continue
@@ -892,7 +922,7 @@ def main(
             )
             if result.back_to_view_selector:
                 continue
-            if result.selection_changed and maybe_prompt_to_start_logging():
+            if result.selection_changed and prompt_log_method_after_selection_change():
                 proceed_to_logging = True
                 break
             continue
@@ -923,24 +953,13 @@ def main(
         sys.exit(1)
     logging.debug("All issues exist")
 
-    log_method = questionary.select(
-        message="How do you want to log the time?",
-        default="auto",
-        choices=[
-            questionary.Choice(
-                title="Automatically (with a timer)",
-                description="We will start a timer so you can start working and later come back.",
-                value="auto",
-                shortcut_key="a",
-            ),
-            questionary.Choice(
-                title="Manually",
-                description='You can enter something like "1h" or "2w".',
-                value="manual",
-                shortcut_key="m",
-            ),
-        ],
-    ).unsafe_ask()
+    if pending_log_method is None:
+        pending_log_method = prompt_log_method(
+            selected_count=len(issue_keys),
+            allow_keep_selecting=False,
+        )
+
+    log_method = pending_log_method
 
     time_spent: str = "0m"
 
