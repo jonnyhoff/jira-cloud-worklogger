@@ -26,6 +26,7 @@ SEARCH_RESULT_LIMIT = 50
 SEARCH_BY_TEXT_VALUE = "__search_by_text__"
 SEARCH_BY_JQL_VALUE = "__search_by_jql__"
 MANUAL_ENTRY_VALUE = "__manual_entry__"
+RETURN_TO_VIEWS_VALUE = "__return_to_views__"
 VIEW_MY_ISSUES = "__view_my_issues__"
 VIEW_TEAM_ISSUES = "__view_team_issues__"
 VIEW_PROJECT_ISSUES = "__view_project_issues__"
@@ -498,8 +499,8 @@ def main(
             clauses.insert(0, f'key = "{normalized_key}"')
         return " OR ".join(clauses) + " ORDER BY updated DESC"
 
-    def issue_choices_for_view(issues: list[Issue]) -> list[questionary.Choice]:
-        return [
+    def issue_choices_for_view(issues: list[Issue]) -> list[questionary.Choice | questionary.Separator]:
+        choices: list[questionary.Choice | questionary.Separator] = [
             questionary.Choice(
                 title=f"{issue.key} - {issue.fields.summary}",
                 description=f"Status: {issue.fields.status}",
@@ -508,6 +509,15 @@ def main(
             )
             for issue in issues
         ]
+        choices.append(questionary.Separator())
+        choices.append(
+            questionary.Choice(
+                title="Back to view selector",
+                value=RETURN_TO_VIEWS_VALUE,
+                shortcut_key="b",
+            )
+        )
+        return choices
 
     selected_issue_keys: list[str] = []
     selected_issue_set: set[str] = set()
@@ -610,13 +620,13 @@ def main(
         *,
         issues: list[Issue],
         prompt_message: str,
-    ) -> None:
+    ) -> bool:
         if not issues:
             questionary.print(
                 "No issues matched that choice.",
                 style="fg:ansiyellow",
             )
-            return
+            return True
 
         for issue in issues:
             issue_cache[issue.key] = issue
@@ -624,12 +634,21 @@ def main(
         choices = issue_choices_for_view(issues)
         selected_values = questionary.checkbox(
             message=prompt_message,
-            instruction="Use arrows to select issues and space to toggle. Type to filter.",
+            instruction="Use arrows to select issues, space to toggle, or choose 'Back to view selector'.",
             choices=choices,
             use_search_filter=True,
             use_jk_keys=False,
         ).unsafe_ask()
+
+        if RETURN_TO_VIEWS_VALUE in selected_values:
+            return False
+
+        selected_values = [
+            value for value in selected_values if value != RETURN_TO_VIEWS_VALUE
+        ]
+
         sync_selection_from_view([issue.key for issue in issues], selected_values)
+        return True
 
     def prompt_manual_issue_key() -> None:
         manual_key = (
@@ -709,10 +728,11 @@ def main(
                 f"Loaded {len(issues)} issue(s) assigned to you.",
                 style="fg:ansigreen" if issues else "fg:ansiyellow",
             )
-            prompt_and_sync_from_issues(
+            if not prompt_and_sync_from_issues(
                 issues=issues,
                 prompt_message="Select from your assigned issues",
-            )
+            ):
+                continue
             continue
 
         if view_choice == VIEW_TEAM_ISSUES:
@@ -721,10 +741,11 @@ def main(
                 f"Loaded {len(issues)} team issue(s).",
                 style="fg:ansigreen" if issues else "fg:ansiyellow",
             )
-            prompt_and_sync_from_issues(
+            if not prompt_and_sync_from_issues(
                 issues=issues,
                 prompt_message="Select shared/team issues",
-            )
+            ):
+                continue
             continue
 
         if view_choice == VIEW_PROJECT_ISSUES:
@@ -740,10 +761,11 @@ def main(
                 f"Loaded {len(issues)} project issue(s).",
                 style="fg:ansigreen" if issues else "fg:ansiyellow",
             )
-            prompt_and_sync_from_issues(
+            if not prompt_and_sync_from_issues(
                 issues=issues,
                 prompt_message="Select project issues",
-            )
+            ):
+                continue
             continue
 
         if view_choice == SEARCH_BY_TEXT_VALUE:
@@ -764,10 +786,11 @@ def main(
                 f"Loaded {len(issues)} issue(s) from keyword search.",
                 style="fg:ansigreen" if issues else "fg:ansiyellow",
             )
-            prompt_and_sync_from_issues(
+            if not prompt_and_sync_from_issues(
                 issues=issues,
                 prompt_message="Select issues from keyword search",
-            )
+            ):
+                continue
             continue
 
         if view_choice == SEARCH_BY_JQL_VALUE:
@@ -788,10 +811,11 @@ def main(
                 f"Loaded {len(issues)} issue(s) from custom JQL.",
                 style="fg:ansigreen" if issues else "fg:ansiyellow",
             )
-            prompt_and_sync_from_issues(
+            if not prompt_and_sync_from_issues(
                 issues=issues,
                 prompt_message="Select issues from custom JQL",
-            )
+            ):
+                continue
             continue
 
         questionary.print(

@@ -95,6 +95,8 @@ issues. The built-in views currently include:
 - `Enter issue key manually` – quick entry for a known key.
 - `Review current selection` – remove previously chosen issues before logging
   time.
+- Within any issue list, choose **Back to view selector** (shortcut `b`) to
+  return without changing your current selection.
 
 You can configure these views during server setup or later by editing the
 section inside `~/.config/jira-worklogger/jira-worklogger.conf`:
