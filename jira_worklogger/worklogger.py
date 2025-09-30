@@ -32,14 +32,6 @@ RETURN_TO_VIEWS_VALUE = "__return_to_views__"
 VIEW_MY_ISSUES = "__view_my_issues__"
 VIEW_TEAM_ISSUES = "__view_team_issues__"
 VIEW_PROJECT_ISSUES = "__view_project_issues__"
-VIEW_REVIEW_SELECTION = "__view_review_selection__"
-VIEW_FINISH_SELECTION = "__view_finish_selection__"
-
-
-@dataclasses.dataclass(frozen=True)
-class SelectionResult:
-    back_to_view_selector: bool
-    selection_changed: bool
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -509,44 +501,6 @@ def main(
             clauses.insert(0, f'key = "{normalized_key}"')
         return " OR ".join(clauses) + " ORDER BY updated DESC"
 
-    def issue_choices_for_view(
-        issues: list[Issue],
-    ) -> list[questionary.Choice | questionary.Separator]:
-        choices: list[questionary.Choice | questionary.Separator] = [
-            questionary.Choice(
-                title=f"{issue.key} - {issue.fields.summary}",
-                description=f"Status: {issue.fields.status}",
-                value=issue.key,
-                checked=issue.key in selected_issue_set,
-            )
-            for issue in issues
-        ]
-        choices.append(questionary.Separator())
-        choices.append(
-            questionary.Choice(
-                title="Back to view selector",
-                value=RETURN_TO_VIEWS_VALUE,
-                shortcut_key="b",
-            )
-        )
-        return choices
-
-    selected_issue_keys: list[str] = []
-    selected_issue_set: set[str] = set()
-
-    def sync_selection_from_view(view_keys: list[str], chosen_keys: list[str]) -> None:
-        nonlocal selected_issue_keys, selected_issue_set
-        for key in chosen_keys:
-            if key not in selected_issue_set:
-                selected_issue_keys.append(key)
-                selected_issue_set.add(key)
-        for key in view_keys:
-            if key not in chosen_keys and key in selected_issue_set:
-                selected_issue_set.remove(key)
-        selected_issue_keys = [
-            key for key in selected_issue_keys if key in selected_issue_set
-        ]
-
     def build_view_choices() -> list[questionary.Choice | questionary.Separator]:
         choices: list[questionary.Choice | questionary.Separator] = []
         choices.append(
@@ -598,83 +552,53 @@ def main(
                 value=MANUAL_ENTRY_VALUE,
             )
         )
-        choices.append(questionary.Separator())
-        if selected_issue_keys:
-            choices.append(
-                questionary.Choice(
-                    title=f"Review current selection ({len(selected_issue_keys)} selected)",
-                    value=VIEW_REVIEW_SELECTION,
-                )
-            )
-            choices.append(
-                questionary.Choice(
-                    title="Done selecting issues",
-                    value=VIEW_FINISH_SELECTION,
-                    shortcut_key="d",
-                )
-            )
-        else:
-            choices.append(
-                questionary.Choice(
-                    title="Review current selection",
-                    disabled="No issues selected yet",
-                )
-            )
-            choices.append(
-                questionary.Choice(
-                    title="Done selecting issues",
-                    disabled="Select at least one issue",
-                )
-            )
         return choices
 
-    def prompt_and_sync_from_issues(
+    def prompt_issue_selection(
         *,
         issues: list[Issue],
         prompt_message: str,
-    ) -> SelectionResult:
+    ) -> str | None:
         if not issues:
             questionary.print(
                 "No issues matched that choice.",
                 style="fg:ansiyellow",
             )
-            return SelectionResult(
-                back_to_view_selector=False,
-                selection_changed=False,
-            )
+            return None
 
         for issue in issues:
             issue_cache[issue.key] = issue
 
-        previous_selection = set(selected_issue_set)
-        choices = issue_choices_for_view(issues)
-        selected_values = questionary.checkbox(
+        choices: list[questionary.Choice | questionary.Separator] = [
+            questionary.Choice(
+                title=f"{issue.key} - {issue.fields.summary}",
+                description=f"Status: {issue.fields.status}",
+                value=issue.key,
+            )
+            for issue in issues
+        ]
+        choices.append(questionary.Separator())
+        choices.append(
+            questionary.Choice(
+                title="Back to view selector",
+                value=RETURN_TO_VIEWS_VALUE,
+                shortcut_key="b",
+            )
+        )
+
+        selected_value = questionary.select(
             message=prompt_message,
-            instruction="Use arrows to select issues, space to toggle, or choose 'Back to view selector'.",
+            instruction="Use arrows to pick an issue or press 'b' to go back.",
             choices=choices,
             use_search_filter=True,
             use_jk_keys=False,
         ).unsafe_ask()
 
-        if RETURN_TO_VIEWS_VALUE in selected_values:
-            return SelectionResult(
-                back_to_view_selector=True,
-                selection_changed=False,
-            )
+        if selected_value == RETURN_TO_VIEWS_VALUE:
+            return None
+        return selected_value
 
-        selected_values = [
-            value for value in selected_values if value != RETURN_TO_VIEWS_VALUE
-        ]
-
-        sync_selection_from_view([issue.key for issue in issues], selected_values)
-        selection_changed = previous_selection != selected_issue_set
-        return SelectionResult(
-            back_to_view_selector=False,
-            selection_changed=selection_changed,
-        )
-
-    def prompt_manual_issue_key() -> bool:
-        previous_selection = set(selected_issue_set)
+    def prompt_manual_issue_key() -> str | None:
         manual_key = (
             questionary.text(
                 message="Enter the Jira issue key:",
@@ -688,42 +612,8 @@ def main(
             .upper()
         )
         if not manual_key:
-            return False
-        if manual_key in selected_issue_set:
-            questionary.print(
-                f"Issue {manual_key} is already selected.",
-                style="fg:ansiyellow",
-            )
-            return False
-        selected_issue_set.add(manual_key)
-        selected_issue_keys.append(manual_key)
-        return previous_selection != selected_issue_set
-
-    def review_current_selection() -> bool:
-        if not selected_issue_keys:
-            questionary.print("No issues selected yet.", style="fg:ansiyellow")
-            return False
-
-        previous_selection = set(selected_issue_set)
-        review_choices = [
-            questionary.Choice(title=key, value=key, checked=True)
-            for key in selected_issue_keys
-        ]
-        updated_selection = questionary.checkbox(
-            message="Review selected issues",
-            instruction="Uncheck any issues you want to remove.",
-            choices=review_choices,
-            use_search_filter=True,
-            use_jk_keys=False,
-        ).unsafe_ask()
-
-        updated_set = set(updated_selection)
-        nonlocal_selected = [key for key in selected_issue_keys if key in updated_set]
-        selected_issue_keys.clear()
-        selected_issue_keys.extend(nonlocal_selected)
-        selected_issue_set.clear()
-        selected_issue_set.update(updated_set)
-        return previous_selection != selected_issue_set
+            return None
+        return manual_key
 
     def project_jql() -> str | None:
         if not server.project_keys:
@@ -731,79 +621,37 @@ def main(
         project_list = ", ".join(server.project_keys)
         return f"project in ({project_list}) AND statusCategory not in (Done)"
 
-    def prompt_log_method(
-        *, selected_count: int, allow_keep_selecting: bool
-    ) -> str:
-        message = (
-            f"{selected_count} issue(s) selected. What next?"
-            if allow_keep_selecting
-            else "How do you want to log the time?"
-        )
-        choices = [
-            questionary.Choice(
-                title="Start Timer",
-                description="Begin a timer now and stop it when you're done.",
-                value="auto",
-                shortcut_key="a",
-            ),
-            questionary.Choice(
-                title="Manual Time Entry",
-                description='Enter a duration such as "1h" or "30m".',
-                value="manual",
-                shortcut_key="m",
-            ),
-        ]
-        if allow_keep_selecting:
-            choices.append(
-                questionary.Choice(
-                    title="Keep selecting issues",
-                    description="Return to issue selection.",
-                    value="keep",
-                    shortcut_key="k",
-                )
-            )
+    def prompt_log_method() -> str:
         return questionary.select(
-            message=message,
+            message="How do you want to log the time?",
             default="auto",
-            choices=choices,
+            choices=[
+                questionary.Choice(
+                    title="Start Timer",
+                    description="Begin a timer now and stop it when you're done.",
+                    value="auto",
+                    shortcut_key="t",
+                ),
+                questionary.Choice(
+                    title="Manual Time Entry",
+                    description='Enter a duration such as "1h" or "30m".',
+                    value="manual",
+                    shortcut_key="m",
+                ),
+            ],
         ).unsafe_ask()
 
-    pending_log_method: str | None = None
-
-    def prompt_log_method_after_selection_change() -> bool:
-        nonlocal pending_log_method
-        if not selected_issue_keys:
-            return False
-        next_action = prompt_log_method(
-            selected_count=len(selected_issue_keys),
-            allow_keep_selecting=True,
-        )
-        if next_action == "keep":
-            return False
-        pending_log_method = next_action
-        return True
-
-    proceed_to_logging = False
-    while not proceed_to_logging:
+    selected_issue_key: str | None = None
+    while selected_issue_key is None:
         view_choice = questionary.select(
             message="How would you like to find issues?",
             choices=build_view_choices(),
         ).unsafe_ask()
 
-        if view_choice == VIEW_FINISH_SELECTION:
-            proceed_to_logging = True
-            break
-
-        if view_choice == VIEW_REVIEW_SELECTION:
-            if review_current_selection() and prompt_log_method_after_selection_change():
-                proceed_to_logging = True
-                break
-            continue
-
         if view_choice == MANUAL_ENTRY_VALUE:
-            if prompt_manual_issue_key() and prompt_log_method_after_selection_change():
-                proceed_to_logging = True
-                break
+            manual_key = prompt_manual_issue_key()
+            if manual_key:
+                selected_issue_key = manual_key
             continue
 
         if view_choice == VIEW_MY_ISSUES:
@@ -813,15 +661,12 @@ def main(
                 f"Loaded {len(issues)} issue(s) assigned to you.",
                 style="fg:ansigreen" if issues else "fg:ansiyellow",
             )
-            result = prompt_and_sync_from_issues(
+            chosen_key = prompt_issue_selection(
                 issues=issues,
                 prompt_message="Select from your assigned issues",
             )
-            if result.back_to_view_selector:
-                continue
-            if result.selection_changed and prompt_log_method_after_selection_change():
-                proceed_to_logging = True
-                break
+            if chosen_key:
+                selected_issue_key = chosen_key
             continue
 
         if view_choice == VIEW_TEAM_ISSUES:
@@ -830,15 +675,12 @@ def main(
                 f"Loaded {len(issues)} team issue(s).",
                 style="fg:ansigreen" if issues else "fg:ansiyellow",
             )
-            result = prompt_and_sync_from_issues(
+            chosen_key = prompt_issue_selection(
                 issues=issues,
                 prompt_message="Select shared/team issues",
             )
-            if result.back_to_view_selector:
-                continue
-            if result.selection_changed and prompt_log_method_after_selection_change():
-                proceed_to_logging = True
-                break
+            if chosen_key:
+                selected_issue_key = chosen_key
             continue
 
         if view_choice == VIEW_PROJECT_ISSUES:
@@ -854,15 +696,12 @@ def main(
                 f"Loaded {len(issues)} project issue(s).",
                 style="fg:ansigreen" if issues else "fg:ansiyellow",
             )
-            result = prompt_and_sync_from_issues(
+            chosen_key = prompt_issue_selection(
                 issues=issues,
                 prompt_message="Select project issues",
             )
-            if result.back_to_view_selector:
-                continue
-            if result.selection_changed and prompt_log_method_after_selection_change():
-                proceed_to_logging = True
-                break
+            if chosen_key:
+                selected_issue_key = chosen_key
             continue
 
         if view_choice == SEARCH_BY_TEXT_VALUE:
@@ -885,15 +724,12 @@ def main(
                 f"Loaded {len(issues)} issue(s) from keyword search.",
                 style="fg:ansigreen" if issues else "fg:ansiyellow",
             )
-            result = prompt_and_sync_from_issues(
+            chosen_key = prompt_issue_selection(
                 issues=issues,
                 prompt_message="Select issues from keyword search",
             )
-            if result.back_to_view_selector:
-                continue
-            if result.selection_changed and prompt_log_method_after_selection_change():
-                proceed_to_logging = True
-                break
+            if chosen_key:
+                selected_issue_key = chosen_key
             continue
 
         if view_choice == SEARCH_BY_JQL_VALUE:
@@ -916,15 +752,12 @@ def main(
                 f"Loaded {len(issues)} issue(s) from custom JQL.",
                 style="fg:ansigreen" if issues else "fg:ansiyellow",
             )
-            result = prompt_and_sync_from_issues(
+            chosen_key = prompt_issue_selection(
                 issues=issues,
                 prompt_message="Select issues from custom JQL",
             )
-            if result.back_to_view_selector:
-                continue
-            if result.selection_changed and prompt_log_method_after_selection_change():
-                proceed_to_logging = True
-                break
+            if chosen_key:
+                selected_issue_key = chosen_key
             continue
 
         questionary.print(
@@ -932,34 +765,26 @@ def main(
             style="fg:ansired",
         )
 
-    if not selected_issue_keys:
+    if selected_issue_key is None:
         questionary.print(
-            "No issues selected. Exiting.",
+            "No issue selected. Exiting.",
             style="fg:ansired",
         )
         sys.exit(1)
 
-    issue_keys = selected_issue_keys
+    issue_key = selected_issue_key
 
-    # Load selected issues to ensure they all exist
-    # TODO(kwk): Can we do this in parallel somehow?
+    # Load the selected issue to ensure it exists
     try:
-        for issue_key in issue_keys:
-            logging.debug(f"Loading issue {issue_key}")
-            jira.issue(id=issue_key, fields=["id", "key"])
+        logging.debug(f"Loading issue {issue_key}")
+        jira.issue(id=issue_key, fields=["id", "key"])
     except JIRAError as ex:
-        questionary.print(f"Failed to find issue with key '{issue_keys}': {ex.text}")
-        questionary.print("Please run the tool again and verify your selections.")
+        questionary.print(f"Failed to find issue with key '{issue_key}': {ex.text}")
+        questionary.print("Please run the tool again and verify your selection.")
         sys.exit(1)
-    logging.debug("All issues exist")
+    logging.debug("Selected issue exists")
 
-    if pending_log_method is None:
-        pending_log_method = prompt_log_method(
-            selected_count=len(issue_keys),
-            allow_keep_selecting=False,
-        )
-
-    log_method = pending_log_method
+    log_method = prompt_log_method()
 
     time_spent: str = "0m"
 
@@ -1024,22 +849,21 @@ def main(
                 default=time_spent,
             ).unsafe_ask()
 
-    # Finally update the worklog of all issues
-    for issue_key in issue_keys:
-        logging.debug(f"Adding worklog for f{issue_key}.")
-        jira.add_worklog(
-            issue=issue_key,
-            timeSpent=time_spent,
-            adjustEstimate="auto",
-            comment=comment,
-        )
-        questionary.print(f"Added worklog to issue {issue_key}")
+    # Finally update the worklog of the selected issue
+    logging.debug(f"Adding worklog for {issue_key}.")
+    jira.add_worklog(
+        issue=issue_key,
+        timeSpent=time_spent,
+        adjustEstimate="auto",
+        comment=comment,
+    )
+    questionary.print(f"Added worklog to issue {issue_key}")
 
     _continue = questionary.select(
-        message=f"Work on another ticket?",
+        message="Work on another ticket?",
         choices=[
-            questionary.Choice(title=f"Yes.", value=True),
-            questionary.Choice(title=f"No.", value=False),
+            questionary.Choice(title="Yes.", value=True),
+            questionary.Choice(title="No.", value=False),
         ],
     ).unsafe_ask()
 
