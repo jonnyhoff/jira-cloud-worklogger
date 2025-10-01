@@ -28,6 +28,7 @@ SEARCH_BY_TEXT_VALUE = "__search_by_text__"
 SEARCH_BY_JQL_VALUE = "__search_by_jql__"
 MANUAL_ENTRY_VALUE = "__manual_entry__"
 RETURN_TO_VIEWS_VALUE = "__return_to_views__"
+RETURN_TO_LOG_METHOD_VALUE = "__return_to_log_method__"
 VIEW_MY_ISSUES = "__view_my_issues__"
 VIEW_TEAM_ISSUES = "__view_team_issues__"
 VIEW_PROJECT_ISSUES = "__view_project_issues__"
@@ -786,11 +787,18 @@ class WorklogFlow:
         self._clock = clock
         self._spinner_factory = spinner_factory
 
-    def log_time(self, issue_key: str) -> None:
+    def log_time(self, issue_key: str) -> bool:
         log_method = self._prompt_log_method()
 
         time_spent = "0m"
         comment = ""
+
+        if log_method == RETURN_TO_LOG_METHOD_VALUE:
+            self._prompt.print(
+                "Returning to issue selection...",
+                style="fg:ansiyellow",
+            )
+            return False
 
         if log_method == "manual":
             comment = self._prompt.text(
@@ -802,15 +810,12 @@ class WorklogFlow:
                 validate=lambda text: True if len(text) > 0 else "Please enter a value",
             )
 
-        if log_method == "auto":
-            self._prompt.press_any_key(
-                message="Press any key to START the timer and begin logging your work..."
-            )
-            start_time = self._clock()
+        elif log_method == "auto":
             self._prompt.print(
-                "Timer running. Leave this terminal open and press Enter when you're done working.",
+                "Timer started. Leave this terminal open and press Enter when you're done working.",
                 style="fg:ansicyan",
             )
+            start_time = self._clock()
             spinner = self._spinner_factory(
                 text="Tracking time...",
                 spinner="dots12",
@@ -832,6 +837,9 @@ class WorklogFlow:
                 message="Enter an optional comment for what you've worked on:",
                 multiline=True,
             )
+
+        else:
+            raise ValueError(f"Unsupported log method '{log_method}'.")
 
         happy_with_time = False
         while not happy_with_time:
@@ -857,6 +865,7 @@ class WorklogFlow:
             comment=comment,
         )
         self._prompt.print(f"Added worklog to issue {issue_key}")
+        return True
 
     def _prompt_log_method(self) -> str:
         return self._prompt.select(
@@ -875,7 +884,14 @@ class WorklogFlow:
                     value="manual",
                     shortcut_key="m",
                 ),
+                questionary.Choice(
+                    title="Back to issue selection",
+                    description="Return and pick a different issue.",
+                    value=RETURN_TO_LOG_METHOD_VALUE,
+                    shortcut_key="b",
+                ),
             ],
+            instruction="Use arrows to choose or press 'b' to go back.",
         )
 
 def _select_server(
@@ -965,23 +981,26 @@ def main(
         jira_service=jira_service,
         spinner_factory=spinner_factory,
     )
-    issue_key = issue_flow.select_issue(active_server)
-
-    try:
-        jira_service.get_issue(issue_key, fields=["id", "key"])
-    except JIRAError as ex:
-        prompt.print(f"Failed to find issue with key '{issue_key}': {ex.text}")
-        prompt.print("Please run the tool again and verify your selection.")
-        sys.exit(1)
-    logging.debug("Selected issue exists")
-
     worklog_flow = WorklogFlow(
         prompt=prompt,
         jira_service=jira_service,
         clock=clock,
         spinner_factory=spinner_factory,
     )
-    worklog_flow.log_time(issue_key)
+
+    worklog_created = False
+    while not worklog_created:
+        issue_key = issue_flow.select_issue(active_server)
+
+        try:
+            jira_service.get_issue(issue_key, fields=["id", "key"])
+        except JIRAError as ex:
+            prompt.print(f"Failed to find issue with key '{issue_key}': {ex.text}")
+            prompt.print("Please run the tool again and verify your selection.")
+            sys.exit(1)
+        logging.debug("Selected issue exists")
+
+        worklog_created = worklog_flow.log_time(issue_key)
 
     _continue = prompt.select(
         message="Work on another ticket?",
