@@ -1,11 +1,10 @@
 [project]
-name = "jira-time-tracker"
+name = "jira-time"
 license = "MIT"
 version = "1.0.0"
 description = "A CLI utility to track how much time you spent on JIRA tickets"
 authors = [
     {name = "Jonathan Hoffman",email = "jonathan.hoffman91@gmail.com"},
-    {name = "Konrad Kleine",email = "kkleine@redhat.com"}
 ]
 readme = "README.md"
 requires-python = ">=3.10"
@@ -16,8 +15,9 @@ dependencies = [
 ]
 
 [project.urls]
-repository = "https://github.com/jonnyhoff/jira-time-tracker"
-"Bug Tracker" = "https://github.com/jonnyhoff/jira-time-tracker/issues"
+repository = "https://github.com/jonnyhoff/jira-time"
+"Bug Tracker" = "https://github.com/jonnyhoff/jira-time/issues"
+"Documentation" = "https://github.com/jonnyhoff/jira-time/blob/main/README.md"
 
 
 [build-system]
@@ -25,4 +25,4 @@ requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"
 
 [tool.poetry.scripts]
-jira-worklogger = "jira_time_tracker.worklogger:cli"
+jira-time = "jira_time.worklogger:cli"

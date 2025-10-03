@@ -5,8 +5,10 @@ import dataclasses
 import datetime
 import logging
 import pathlib
+import random
 import re
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import field
 from typing import Any, Protocol
@@ -17,12 +19,17 @@ from jira import JIRA
 from jira.client import ResultList
 from jira.exceptions import JIRAError
 from jira.resources import Issue
+from requests.exceptions import ConnectionError as RequestsConnectionError
+from requests.exceptions import ReadTimeout as RequestsReadTimeout
+from requests.exceptions import RequestException
+from urllib3.exceptions import ReadTimeoutError as Urllib3ReadTimeout
 
 logging.basicConfig(level=logging.INFO)
 
 
 DEFAULT_ISSUE_JQL = "assignee=currentUser() AND statusCategory not in (Done)"
 DEFAULT_TEAM_ISSUE_JQL = ""  # Optional, user can configure later
+REQUEST_TIMEOUT_SECONDS = 3
 SEARCH_RESULT_LIMIT = 50
 SEARCH_BY_TEXT_VALUE = "__search_by_text__"
 SEARCH_BY_JQL_VALUE = "__search_by_jql__"
@@ -226,7 +233,9 @@ class ServerPrompter:
         url = self._prompt.text(
             message="Which JIRA server to connect to?",
             default="https://your-instance.atlassian.net",
-            validate=lambda text: True if len(text) > 0 else "Please, enter a JIRA server",
+            validate=lambda text: True
+            if len(text) > 0
+            else "Please, enter a JIRA server",
         ).strip()
         auth_type = self._prompt.select(
             message="Which authentication method do you want to configure?",
@@ -264,7 +273,9 @@ class ServerPrompter:
             message="Optional Jira project keys for broader searches (comma separated):",
             default="",
         ).strip()
-        project_keys = [key.strip() for key in project_keys_input.split(",") if key.strip()]
+        project_keys = [
+            key.strip() for key in project_keys_input.split(",") if key.strip()
+        ]
 
         if auth_type == "pat":
             pat = self._prompt.password(
@@ -325,19 +336,14 @@ def add_new_server(config: "Config", prompter: ServerPrompter) -> None:
     config.add_server(server)
 
 
-
-
-
 class AuthStrategy(Protocol):
-    def supports(self, server: Server) -> bool:
-        ...
+    def supports(self, server: Server) -> bool: ...
 
     def authenticate(
         self,
         server: Server,
         connector: Callable[..., tuple[JIRA, dict[str, Any]]],
-    ) -> tuple[JIRA, dict[str, Any]]:
-        ...
+    ) -> tuple[JIRA, dict[str, Any]]: ...
 
 
 class PatAuthStrategy:
@@ -423,9 +429,46 @@ class JiraAuthenticator:
 class JiraService:
     def __init__(self, client: JIRA) -> None:
         self._client = client
+        self._max_attempts = 3
+        self._base_delay = 1.0
+
+    def _is_transient(self, ex: Exception) -> bool:
+        if isinstance(
+            ex, (RequestsConnectionError, RequestsReadTimeout, Urllib3ReadTimeout)
+        ):
+            return True
+        if isinstance(ex, JIRAError):
+            # Treat rate limiting and 5xx as transient
+            return ex.status_code in {429, 500, 502, 503, 504}
+        return False
+
+    def _retry(self, action_desc: str, func: Callable[[], Any]) -> Any:
+        last_ex: Exception | None = None
+        for attempt in range(1, self._max_attempts + 1):
+            try:
+                return func()
+            except Exception as ex:  # noqa: BLE001 broad but filtered by _is_transient
+                last_ex = ex
+                if not self._is_transient(ex) or attempt == self._max_attempts:
+                    break
+                # Exponential backoff with jitter
+                delay = self._base_delay * (2 ** (attempt - 1))
+                delay = delay + random.uniform(0, 0.25 * delay)
+                logging.warning(
+                    "Transient failure during %s (attempt %d/%d): %s. Retrying in %.1fs...",
+                    action_desc,
+                    attempt,
+                    self._max_attempts,
+                    getattr(ex, "message", str(ex)),
+                    delay,
+                )
+                time.sleep(delay)
+        # Exhausted retries; raise last exception
+        assert last_ex is not None
+        raise last_ex
 
     def myself(self) -> dict[str, Any]:
-        return self._client.myself()
+        return self._retry("fetch profile", lambda: self._client.myself())
 
     def search_issues(
         self,
@@ -439,11 +482,16 @@ class JiraService:
             "fields": fields,
         }
         search_kwargs["maxResults"] = False if limit is None else limit
-        results: ResultList[Issue] = self._client.search_issues(**search_kwargs)
+        results: ResultList[Issue] = self._retry(
+            "search issues", lambda: self._client.search_issues(**search_kwargs)
+        )
         return list(results)
 
     def get_issue(self, issue_key: str, *, fields: list[str] | None = None) -> Issue:
-        return self._client.issue(id=issue_key, fields=fields)
+        return self._retry(
+            "get issue",
+            lambda: self._client.issue(id=issue_key, fields=fields),
+        )
 
     def add_worklog(
         self,
@@ -452,27 +500,51 @@ class JiraService:
         time_spent: str,
         comment: str,
     ) -> None:
-        self._client.add_worklog(
-            issue=issue_key,
-            timeSpent=time_spent,
-            adjustEstimate="auto",
-            comment=comment,
-        )
+        def _call() -> Any:
+            return self._client.add_worklog(
+                issue=issue_key,
+                timeSpent=time_spent,
+                adjustEstimate="auto",
+                comment=comment,
+            )
+
+        self._retry("add worklog", _call)
 
 
 def connect_to_jira(server: Server) -> tuple[JIRA, dict[str, Any]]:
     """Create an authenticated JIRA client for the given server configuration."""
 
     def _attempt_connection(**auth_kwargs: Any) -> tuple[JIRA, dict[str, Any]]:
-        client = JIRA(server=server.url, **auth_kwargs)
-        profile = client.myself()
-        return client, profile
+        # Set a sensible default timeout so requests don't hang forever
+        client = JIRA(server=server.url, timeout=REQUEST_TIMEOUT_SECONDS, **auth_kwargs)
+        # Fetch profile to verify credentials; allow a couple of retries for transient faults
+        attempts = 3
+        last_ex: Exception | None = None
+        for i in range(1, attempts + 1):
+            try:
+                profile = client.myself()
+                return client, profile
+            except Exception as ex:  # noqa: BLE001
+                last_ex = ex
+                # Only retry on transient network conditions
+                transient = isinstance(
+                    ex,
+                    (RequestsConnectionError, RequestsReadTimeout, Urllib3ReadTimeout),
+                ) or (
+                    isinstance(ex, JIRAError)
+                    and ex.status_code in {429, 500, 502, 503, 504}
+                )
+                if not transient or i == attempts:
+                    break
+                delay = 0.5 * (2 ** (i - 1))
+                time.sleep(delay)
+        assert last_ex is not None
+        raise last_ex
 
     authenticator = JiraAuthenticator(
         strategies=[PatAuthStrategy(), CloudTokenAuthStrategy()]
     )
     return authenticator.authenticate(server, _attempt_connection)
-
 
 
 class IssueSelectionFlow:
@@ -562,7 +634,9 @@ class IssueSelectionFlow:
                 if not search_term:
                     continue
                 keyword_jql = self._build_keyword_search_jql(search_term)
-                issues = self._fetch_issues_with_jql(keyword_jql, limit=SEARCH_RESULT_LIMIT)
+                issues = self._fetch_issues_with_jql(
+                    keyword_jql, limit=SEARCH_RESULT_LIMIT
+                )
                 self._print_issue_count(
                     message=f"Loaded {len(issues)} issue(s) from keyword search.",
                     issues=issues,
@@ -630,9 +704,15 @@ class IssueSelectionFlow:
                 fields=ISSUE_FIELDS,
                 limit=limit,
             )
-        except JIRAError as ex:
+        except (
+            JIRAError,
+            RequestsReadTimeout,
+            RequestsConnectionError,
+            Urllib3ReadTimeout,
+            RequestException,
+        ) as ex:
             self._prompt.print(
-                f"Failed to run JQL search: {ex.text}",
+                f"Failed to run JQL search: {ex.text if isinstance(ex, JIRAError) else str(ex)}",
                 style="fg:ansired",
             )
             return []
@@ -642,7 +722,7 @@ class IssueSelectionFlow:
         return issues
 
     def _build_keyword_search_jql(self, term: str) -> str:
-        escaped_term = term.replace('"', '\"')
+        escaped_term = term.replace('"', '"')
         clauses = [
             f'summary ~ "{escaped_term}"',
             f'description ~ "{escaped_term}"',
@@ -749,13 +829,17 @@ class IssueSelectionFlow:
         return selected_value
 
     def _prompt_manual_issue_key(self) -> str | None:
-        manual_key = self._prompt.text(
-            message="Enter the Jira issue key:",
-            instruction="For example: TEAM-123",
-            validate=lambda text: True
-            if len(text.strip()) > 0
-            else "Please enter a value",
-        ).strip().upper()
+        manual_key = (
+            self._prompt.text(
+                message="Enter the Jira issue key:",
+                instruction="For example: TEAM-123",
+                validate=lambda text: True
+                if len(text.strip()) > 0
+                else "Please enter a value",
+            )
+            .strip()
+            .upper()
+        )
         if not manual_key:
             return None
         return manual_key
@@ -855,17 +939,46 @@ class WorklogFlow:
             if not happy_with_time:
                 time_spent = self._prompt.text(
                     message='How much time did you time spent, e.g. "2d", or "30m"?',
-                    validate=lambda text: True if len(text) > 0 else "Please enter a value",
+                    validate=lambda text: True
+                    if len(text) > 0
+                    else "Please enter a value",
                     default=time_spent,
                 )
 
-        self._jira_service.add_worklog(
-            issue_key=issue_key,
-            time_spent=time_spent,
-            comment=comment,
-        )
-        self._prompt.print(f"Added worklog to issue {issue_key}")
-        return True
+        # Attempt to add worklog with automatic retries; on failure, offer manual retry
+        while True:
+            try:
+                self._jira_service.add_worklog(
+                    issue_key=issue_key,
+                    time_spent=time_spent,
+                    comment=comment,
+                )
+                self._prompt.print(
+                    f"Added worklog to issue {issue_key}", style="fg:ansigreen"
+                )
+                return True
+            except (
+                JIRAError,
+                RequestsReadTimeout,
+                RequestsConnectionError,
+                Urllib3ReadTimeout,
+                RequestException,
+            ) as ex:  # noqa: PERF203
+                # Give a concise, user-friendly error and option to retry
+                error_text = ex.text if isinstance(ex, JIRAError) else str(ex)
+                self._prompt.print(
+                    f"Failed to add worklog: {error_text}",
+                    style="fg:ansired",
+                )
+                retry = self._prompt.select(
+                    message="Do you want to retry submitting the worklog?",
+                    choices=[
+                        questionary.Choice(title="Yes, retry.", value=True),
+                        questionary.Choice(title="No, cancel.", value=False),
+                    ],
+                )
+                if not retry:
+                    return False
 
     def _prompt_log_method(self) -> str:
         return self._prompt.select(
@@ -893,6 +1006,7 @@ class WorklogFlow:
             ],
             instruction="Use arrows to choose or press 'b' to go back.",
         )
+
 
 def _select_server(
     config: "Config",
@@ -994,10 +1108,28 @@ def main(
 
         try:
             jira_service.get_issue(issue_key, fields=["id", "key"])
-        except JIRAError as ex:
-            prompt.print(f"Failed to find issue with key '{issue_key}': {ex.text}")
-            prompt.print("Please run the tool again and verify your selection.")
-            sys.exit(1)
+        except (
+            JIRAError,
+            RequestsReadTimeout,
+            RequestsConnectionError,
+            Urllib3ReadTimeout,
+            RequestException,
+        ) as ex:
+            text = ex.text if isinstance(ex, JIRAError) else str(ex)
+            prompt.print(
+                f"Failed to confirm issue '{issue_key}': {text}", style="fg:ansired"
+            )
+            retry_issue = prompt.select(
+                message="Try to confirm the issue again?",
+                choices=[
+                    questionary.Choice(title="Yes, retry.", value=True),
+                    questionary.Choice(title="No, go back to selection.", value=False),
+                ],
+            )
+            if not retry_issue:
+                continue
+            # Retry once more via loop by not setting worklog_created
+            continue
         logging.debug("Selected issue exists")
 
         worklog_created = worklog_flow.log_time(issue_key)
@@ -1020,6 +1152,7 @@ def main(
             clock=clock,
             spinner_factory=spinner_factory,
         )
+
 
 def cli(args: dict[str, str] | None = None) -> None:
     prompt = QuestionaryIO()

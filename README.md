@@ -6,6 +6,14 @@ JIRA issues without the need to click through the JIRA web interface. We allow
 you to log the time either automatically (with a timer) or manually (by entering
 how much time you've spent in words, e.g. `1h`, `30m`).
 
+Resilience and timeouts
+-----------------------
+
+The CLI now uses sensible HTTP timeouts and automatically retries transient
+failures (network timeouts, rate limiting, and 5xx responses). If automatic
+retries still fail, you will be asked whether you want to try again
+manually, instead of the tool crashing with a traceback.
+
 Installation
 ------------
 
