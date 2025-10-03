@@ -17,10 +17,10 @@ manually, instead of the tool crashing with a traceback.
 Installation
 ------------
 
-Install `jira-worklogger` from pip using this command:
+Install `jira-time` from pip using this command:
 
 ```console
-$ python -m pip install jira-worklogger
+$ pipx install jira-time
 ```
 
 Demo
@@ -29,7 +29,7 @@ Demo
 First time setup and automatic time logging
 -------------------------------------------
 
-This demonstration shows how `jira-worklogger` is set up for the first time and
+This demonstration shows how `jira-time` is set up for the first time and
 then used to track the time you spent on a JIRA issue automatically. For this,
 select at least one issue from your open issues list and start the timer. Leave the
 terminal open and start working on your issue. A spinner will show that the timer is
@@ -85,7 +85,7 @@ Personal Access Token" option. To acquire a personal access token you have to go
 For the Red Hat issues, that is [here](https://issues.redhat.com/secure/ViewProfile.jspa?selectedTab=com.atlassian.pats.pats-plugin:jira-user-personal-access-tokens).
 
 > **Security note:** The credentials you enter during setup are written to
-> `~/.config/jira-worklogger/jira-worklogger.conf` in plain text.
+> `~/.config/jira-time/jira-time.conf` in plain text.
 
 ### Controlling which issues appear
 
@@ -114,7 +114,7 @@ or keep browsing. Pick the new option to jump straight into either the timer or
 manual entry flow without revisiting the view selector.
 
 You can configure these views during server setup or later by editing the
-section inside `~/.config/jira-worklogger/jira-worklogger.conf`:
+section inside `~/.config/jira-time/jira-time.conf`:
 
 ```
 [my-server]
@@ -132,8 +132,8 @@ Leave `team_issue_jql` and `project_keys` blank if you don’t need those views.
 Clone the code.
 
 ```console
-$ git clone https://github.com/kwk/jira-worklogger
-$ cd jira-worklogger
+$ git clone https://github.com/jonnyhoff/jira-time
+$ cd jira-time
 ```
 
 Install dependencies and set up virtual environment.
@@ -144,15 +144,15 @@ Installing dependencies from lock file
 
 No dependencies to install or update
 
-Installing the current project: jira-worklogger (0.1.0)
+Installing the current project: jira-time (1.0.0)
 ```
 
-Run the `jira-worklogger` CLI tool using poetry.
+Run the `jira-time` CLI tool using poetry.
 
 ```console
-$ poetry run jira-worklogger
+$ poetry run jira-time
 ? Please select a server to work with (Use arrow keys)
- » Red Hat - https://issues.redhat.com
+ » Red Hat - https://yourcompany.jira.com
    ---------------
    Add a new server
 ```

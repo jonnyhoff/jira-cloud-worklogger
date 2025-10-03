@@ -108,9 +108,9 @@ class Config:
     def __init__(self) -> None:
         self.servers: list[Server] = []
         self.config_dir = pathlib.Path.home().joinpath(
-            pathlib.Path(".config/jira-worklogger/")
+            pathlib.Path(".config/jira-time/")
         )
-        self.config_path = self.config_dir.joinpath("jira-worklogger.conf")
+        self.config_path = self.config_dir.joinpath("jira-time.conf")
         self._parser: configparser.ConfigParser = None
 
     def load(self) -> None:
@@ -283,7 +283,7 @@ class ServerPrompter:
                 validate=lambda text: True if len(text) > 0 else "Please enter a value",
             ).strip()
             self._prompt.print(
-                "The token is stored unencrypted in ~/.config/jira-worklogger/jira-worklogger.conf.",
+                "The token is stored unencrypted in ~/.config/jira-time/jira-time.conf.",
                 style="fg:ansiyellow",
             )
             return Server(
@@ -306,7 +306,7 @@ class ServerPrompter:
             validate=lambda text: True if len(text) > 0 else "Please enter a value",
         ).strip()
         self._prompt.print(
-            "The email and API token are stored unencrypted in ~/.config/jira-worklogger/jira-worklogger.conf.",
+            "The email and API token are stored unencrypted in ~/.config/jira-time/jira-time.conf.",
             style="fg:ansiyellow",
         )
         return Server(
